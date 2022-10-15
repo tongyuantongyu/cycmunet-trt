@@ -138,7 +138,7 @@ void RunTest(const std::string &file_prefix, DCNLayerInput<float> &inputs, DCNLa
       for (offset_t h = 0; h < oshape[2]; ++h) {
         for (offset_t w = 0; w < oshape[3]; ++w) {
           EXPECT_NEAR(output_ref.at(n, c, h, w), output_cpu.at(n, c, h, w), Epsilon) << "The coordinate is [" << n << "," << c << "," << h << "," << w << "]";
-          float diff = fabs(output_ref.at(n, c, h, w) - output_cpu.at(n, c, h, w));
+          float diff = std::abs(output_ref.at(n, c, h, w) - output_cpu.at(n, c, h, w));
           total += diff;
           max = diff > max ? diff : max;
         }
@@ -198,7 +198,7 @@ void RunTest(const std::string &file_prefix, DCNLayerInput<half> &inputs, DCNLay
       for (offset_t h = 0; h < oshape[2]; ++h) {
         for (offset_t w = 0; w < oshape[3]; ++w) {
           EXPECT_NEAR(output_ref.at(n, c, h, w), output_cpu.at(n, c, h, w), EpsilonHalf) << "The coordinate is [" << n << "," << c << "," << h << "," << w << "]";
-          float diff = fabs(output_ref.at(n, c, h, w) - output_cpu.at(n, c, h, w));
+          float diff = std::abs(output_ref.at(n, c, h, w) - output_cpu.at(n, c, h, w));
           total += diff;
           max = diff > max ? diff : max;
         }
@@ -231,7 +231,7 @@ TEST(DCNLayerTest, SmallInput) {
       0.1,
       0};
 
-  RunTest("./testdata/small/", input, output, config);
+  RunTest("./small/", input, output, config);
 }
 
 TEST(DCNLayerTest, RealCase) {
@@ -256,7 +256,7 @@ TEST(DCNLayerTest, RealCase) {
       0,
       0};
 
-  RunTest("./testdata/real/", input, output, config, 20);
+  RunTest("./real/", input, output, config, 20);
 }
 
 TEST(DCNLayerTest, RealCaseHalf) {
@@ -281,5 +281,5 @@ TEST(DCNLayerTest, RealCaseHalf) {
       0,
       0};
 
-  RunTest("./testdata/real/", input, output, config, 20);
+  RunTest("./real/", input, output, config, 20);
 }

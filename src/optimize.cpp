@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "config.h"
 #include "layers.h"
 #include "weights.pb.h"
 
@@ -36,60 +37,6 @@
       exit(2);                                                          \
     }                                                                   \
   } while (0)
-
-const uint32_t feature_count = 64;
-const uint32_t deformable_groups = 8;
-constexpr int32_t input_height = 180;
-constexpr int32_t input_width = 320;
-static_assert(input_height % 4 == 0 && input_width % 4 == 0);
-constexpr int32_t input_height_min = input_height;
-constexpr int32_t input_width_min = input_width;
-constexpr int32_t input_height_opt = input_height;
-constexpr int32_t input_width_opt = input_width;
-constexpr int32_t input_height_max = input_height;
-constexpr int32_t input_width_max = input_width;
-
-constexpr int32_t batch_extract = 5;
-constexpr int32_t batch_fusion = batch_extract - 1;
-constexpr int32_t batch_cycle = batch_fusion;
-
-constexpr bool use_fp16 = true;
-constexpr auto ioDataType = use_fp16 ? nvinfer1::DataType::kHALF : nvinfer1::DataType::kFLOAT;
-
-nvinfer1::ITimingCache *cache = nullptr;
-
-void init_cache(nvinfer1::IBuilderConfig *config) {
-  if (cache != nullptr) {
-    config->setTimingCache(*cache, false);
-    return;
-  }
-
-  std::ifstream input("outputs/timing.cache", std::ios::binary | std::ios::in);
-  if (input.is_open()) {
-    auto size = std::filesystem::file_size("outputs/timing.cache");
-    auto *values = new char[size];
-    input.read(values, size);
-    cache = config->createTimingCache(values, size);
-    delete[] values;
-    input.close();
-  }
-  else {
-    cache = config->createTimingCache(nullptr, 0);
-  }
-
-  config->setTimingCache(*cache, false);
-}
-
-void save_cache() {
-  if (cache == nullptr) {
-    return;
-  }
-
-  std::ofstream output("outputs/timing.cache", std::ios::binary | std::ios::out);
-  auto memory = cache->serialize();
-  output.write(static_cast<char *>(memory->data()), memory->size());
-  output.close();
-}
 
 class OwnedWeights : public nvinfer1::Weights {
  public:
@@ -158,25 +105,19 @@ void inspectNetwork(nvinfer1::INetworkDefinition *network) {
   std::cout.flush();
 }
 
-//static nvinfer1::IPluginRegistry *plugins = nvinfer1::getBuilderPluginRegistry(nvinfer1::EngineCapability::kSTANDARD);
-static nvinfer1::IPluginRegistry *plugins = getPluginRegistry();
-
 struct NetworkDefinitionHelper {
   nvinfer1::INetworkDefinition *network;
   const WeightMap &weight_map;
   std::vector<std::unique_ptr<float[]>> buffers;
   std::unordered_map<std::string, uint64_t> naming;
 
+  static nvinfer1::IPluginRegistry *plugins;
+
   template<typename Kernel, typename Stride, typename Padding>
-  nvinfer1::ITensor *makeConv2d(const std::string &name,
-                                nvinfer1::ITensor *input,
-                                int32_t channels,
-                                Kernel k,
-                                Stride s,
+  nvinfer1::ITensor *makeConv2d(const std::string &name, nvinfer1::ITensor *input, int32_t channels, Kernel k, Stride s,
                                 Padding p) {
     nvinfer1::DimsHW kernel = asDims(k), stride = asDims(s), padding = asDims(p);
-    auto conv = network->addConvolutionNd(*input,
-                                          channels,
+    auto conv = network->addConvolutionNd(*input, channels,
                                           kernel,
                                           weight_map.at(name + ".weight"),
                                           weight_map.at(name + ".bias"));
@@ -468,40 +409,81 @@ struct NetworkDefinitionHelper {
   }
 };
 
+// nvinfer1::getBuilderPluginRegistry(nvinfer1::EngineCapability::kSTANDARD);
+nvinfer1::IPluginRegistry *NetworkDefinitionHelper::plugins = getPluginRegistry();
+
 static Logger gLogger;
 
-nvinfer1::IBuilderConfig *prepareConfig(nvinfer1::IBuilder *builder) {
-  auto config = builder->createBuilderConfig();
-  if (use_fp16) {
-    config->setFlag(nvinfer1::BuilderFlag::kFP16);
-  }
-  config->setFlag(nvinfer1::BuilderFlag::kSPARSE_WEIGHTS);
-  config->setFlag(nvinfer1::BuilderFlag::kPREFER_PRECISION_CONSTRAINTS);
-  // /usr/src/tensorrt/bin/trtexec --verbose --noDataTransfers --useCudaGraph --separateProfileRun --useSpinWait --nvtxMode=verbose --loadEngine=./mutual_cycle.engine --exportTimes=./mutual_cycle.timing.json --exportProfile=./mutual_cycle.profile.json --exportLayerInfo=./mutual_cycle.graph.json --timingCacheFile=./timing.cache --best --avgRuns=1000 "--shapes=lf0:1x64x180x270,lf1:1x64x180x270,lf2:1x64x180x270"
-  config->setProfilingVerbosity(nvinfer1::ProfilingVerbosity::kDETAILED);
+struct OptimizationContext {
+  OptimizationConfig config;
 
-  init_cache(config);
-  return config;
-}
+  nvinfer1::DataType ioDataType;
+
+  nvinfer1::IBuilder *builder;
+  WeightMap weights;
+  nvinfer1::ITimingCache *cache;
+
+  void init_cache() {
+    auto conf = builder->createBuilderConfig();
+
+    std::ifstream input("outputs/timing.cache", std::ios::binary | std::ios::in);
+    if (input.is_open()) {
+      auto size = std::filesystem::file_size("outputs/timing.cache");
+      auto *values = new char[size];
+      input.read(values, size);
+      cache = conf->createTimingCache(values, size);
+      delete[] values;
+      input.close();
+    }
+    else {
+      cache = conf->createTimingCache(nullptr, 0);
+    }
+  }
+
+  void save_cache() const {
+    if (cache == nullptr) {
+      return;
+    }
+
+    std::ofstream output("outputs/timing.cache", std::ios::binary | std::ios::out);
+    auto memory = cache->serialize();
+    output.write(static_cast<char *>(memory->data()), memory->size());
+    output.close();
+  }
+
+  nvinfer1::IBuilderConfig *prepareConfig() const {
+    auto conf = builder->createBuilderConfig();
+    if (config.use_fp16) { conf->setFlag(nvinfer1::BuilderFlag::kFP16); }
+    conf->setFlag(nvinfer1::BuilderFlag::kSPARSE_WEIGHTS);
+    conf->setFlag(nvinfer1::BuilderFlag::kPREFER_PRECISION_CONSTRAINTS);
+    // /usr/src/tensorrt/bin/trtexec --verbose --noDataTransfers --useCudaGraph --separateProfileRun --useSpinWait --nvtxMode=verbose --loadEngine=./mutual_cycle.engine --exportTimes=./mutual_cycle.timing.json --exportProfile=./mutual_cycle.profile.json --exportLayerInfo=./mutual_cycle.graph.json --timingCacheFile=./timing.cache --best --avgRuns=1000 "--shapes=lf0:1x64x180x270,lf1:1x64x180x270,lf2:1x64x180x270"
+    conf->setProfilingVerbosity(nvinfer1::ProfilingVerbosity::kDETAILED);
+    conf->setTimingCache(*cache, false);
+
+    return conf;
+  }
+
+  nvinfer1::INetworkDefinition *createNetwork() const {
+    return builder->createNetworkV2(1u << uint32_t(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
+  }
+};
 
 const char *InputFeatureExtract = "frame";
 const char *OutputFeatureExtract[] = {"l1", "l2", "l3"};
 
-void buildFeatureExtract(nvinfer1::IBuilder *builder,
-                         const WeightMap &weights) {
-  auto network = builder->createNetworkV2(1u << uint32_t(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
-  NetworkDefinitionHelper helper{network, weights};
+void buildFeatureExtract(OptimizationContext &ctx, const std::string &model_path, const std::string &save_path) {
+  auto network = ctx.createNetwork();
 
-//  {
-//    auto input = network->addInput(InputFeatureExtract, ioDataType, nvinfer1::Dims4{-1, -1, -1, 3});
-//
-//    input = helper.makeElementWiseArray(input, nvinfer1::ElementWiseOperation::kSUB, {0.485, 0.456, 0.406}, "normalize-mean");
-//    input = helper.makeElementWiseArray(input, nvinfer1::ElementWiseOperation::kDIV, {0.229, 0.224, 0.225}, "normalize-std");
-//
-//    // interleave to planar
-//    auto shuffle_in = network->addShuffle(*input);
-//    shuffle_in->setName("uninterleave");
-//    shuffle_in->setFirstTranspose({0, 3, 1, 2});
+  //  {
+  //    auto input = network->addInput(InputFeatureExtract, ioDataType, nvinfer1::Dims4{-1, -1, -1, 3});
+  //
+  //    input = helper.makeElementWiseArray(input, nvinfer1::ElementWiseOperation::kSUB, {0.485, 0.456, 0.406}, "normalize-mean");
+  //    input = helper.makeElementWiseArray(input, nvinfer1::ElementWiseOperation::kDIV, {0.229, 0.224, 0.225}, "normalize-std");
+  //
+  //    // interleave to planar
+  //    auto shuffle_in = network->addShuffle(*input);
+  //    shuffle_in->setName("uninterleave");
+  //    shuffle_in->setFirstTranspose({0, 3, 1, 2});
 //    auto tensor = shuffle_in->getOutput(0);
 //
 //    // L1_fea = self.lrelu(self.conv_first(x.view(-1, C, H, W)))
@@ -546,37 +528,43 @@ void buildFeatureExtract(nvinfer1::IBuilder *builder,
 
   {
     auto parser = nvonnxparser::createParser(*network, gLogger);
-    //    parser->parseFromFile("model_src/cycmunet-mc-simp-dy-processed.onnx", 1);
-    parser->parseFromFile("model_src/cycmunet-fe-dy-processed.onnx", 1);
-    //    parser->parseFromFile("models/cycmunet-mc-dy-sized-13.onnx", 1);
+    //    parser->parseFromFile("model_src/cycmunet-fe-dy-processed.onnx", 1);
+    parser->parseFromFile(model_path.c_str(), 1);
 
     network->getInput(0)->setName(InputFeatureExtract);
     network->getOutput(0)->setName(OutputFeatureExtract[0]);
     network->getOutput(1)->setName(OutputFeatureExtract[1]);
     network->getOutput(1)->setName(OutputFeatureExtract[2]);
 
-    network->getInput(0)->setType(ioDataType);
-    network->getOutput(0)->setType(ioDataType);
-    network->getOutput(1)->setType(ioDataType);
-    network->getOutput(2)->setType(ioDataType);
+    network->getInput(0)->setType(ctx.ioDataType);
+    network->getOutput(0)->setType(ctx.ioDataType);
+    network->getOutput(1)->setType(ctx.ioDataType);
+    network->getOutput(2)->setType(ctx.ioDataType);
   }
 
   std::cout << "Done define feature extract net." << std::endl;
 
-  auto config = prepareConfig(builder);
+  auto config = ctx.prepareConfig();
   //  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 512llu * 1024 * 1024);
 
-  auto profile = builder->createOptimizationProfile();
-  profile->setDimensions(InputFeatureExtract, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_extract, input_height_min, input_width_min, 3});
-  profile->setDimensions(InputFeatureExtract, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_extract, input_height_opt, input_width_opt, 3});
-  profile->setDimensions(InputFeatureExtract, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_extract, input_height_max, input_width_max, 3});
+  auto profile = ctx.builder->createOptimizationProfile();
+  profile->setDimensions(
+      InputFeatureExtract, nvinfer1::OptProfileSelector::kMIN,
+      nvinfer1::Dims4{ctx.config.batch_extract.min, ctx.config.input_height.min, ctx.config.input_width.min, 3});
+  profile->setDimensions(
+      InputFeatureExtract, nvinfer1::OptProfileSelector::kOPT,
+      nvinfer1::Dims4{ctx.config.batch_extract.opt, ctx.config.input_height.opt, ctx.config.input_width.opt, 3});
+  profile->setDimensions(
+      InputFeatureExtract, nvinfer1::OptProfileSelector::kMAX,
+      nvinfer1::Dims4{ctx.config.batch_extract.max, ctx.config.input_height.max, ctx.config.input_width.max, 3});
   config->addOptimizationProfile(profile);
 
-  auto modelStream = builder->buildSerializedNetwork(*network, *config);
+  auto modelStream = ctx.builder->buildSerializedNetwork(*network, *config);
 
   std::cout << "Done build feature extract net." << std::endl;
 
-  std::ofstream p("models/feature_extract.engine", std::ios::binary);
+  //  std::ofstream p("models/feature_extract.engine", std::ios::binary);
+  std::ofstream p(save_path, std::ios::binary);
   COND_CHECK(p.is_open(), "Unable to open engine file.");
   p.write(static_cast<const char *>(modelStream->data()), modelStream->size());
   p.close();
@@ -586,70 +574,70 @@ void buildFeatureExtract(nvinfer1::IBuilder *builder,
 const char *InputFeatureFusion[] = {"f0l1", "f0l2", "f0l3", "f2l1", "f2l2", "f2l3"};
 const char *OutputFeatureFusion = "f1l1";
 
-void buildFeatureFusion(nvinfer1::IBuilder *builder,
-                        const WeightMap &weights) {
-  auto network = builder->createNetworkV2(1u << uint32_t(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
-  NetworkDefinitionHelper helper{network, weights};
+void buildFeatureFusion(OptimizationContext &ctx, const std::string &save_path) {
+  auto network = ctx.createNetwork();
+  NetworkDefinitionHelper helper{network, ctx.weights};
+  auto feature_count = ctx.config.feature_count;
+  auto deformable_groups = ctx.config.deformable_groups;
 
   {
     nvinfer1::ITensor *f1[] = {
-        network->addInput(InputFeatureFusion[0], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
-        network->addInput(InputFeatureFusion[1], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
-        network->addInput(InputFeatureFusion[2], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1})};
+        network->addInput(InputFeatureFusion[0], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
+        network->addInput(InputFeatureFusion[1], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
+        network->addInput(InputFeatureFusion[2], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1})};
 
     nvinfer1::ITensor *f2[] = {
-        network->addInput(InputFeatureFusion[3], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
-        network->addInput(InputFeatureFusion[4], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
-        network->addInput(InputFeatureFusion[5], ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1})};
+        network->addInput(InputFeatureFusion[3], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
+        network->addInput(InputFeatureFusion[4], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1}),
+        network->addInput(InputFeatureFusion[5], ctx.ioDataType, nvinfer1::Dims4{-1, feature_count, -1, -1})};
 
     auto makePCDAlign = [&](nvinfer1::ITensor *f1[3], nvinfer1::ITensor *f2[3], const std::string &suffix) -> nvinfer1::ITensor * {
       // clang-format off
 
-    // L3_offset = torch.cat([fea1[2], fea2[2]], dim=1)
-    // L3_offset = self.lrelu(self.L3_offset_conv1_1(L3_offset))
-    // L3_offset = self.lrelu(self.L3_offset_conv2_1(L3_offset))
-    // L3_fea = self.lrelu(self.L3_dcnpack_1(fea1[2], L3_offset))
-    auto l3_offset = helper.makeConcatenation({f1[2], f2[2]}, 1);
-         l3_offset = helper.makeConv2dLeakyReLU("pcd_align.L3_offset_conv1" + suffix, l3_offset, feature_count, 3, 1, 1, 0.1);
-         l3_offset = helper.makeConv2dLeakyReLU("pcd_align.L3_offset_conv2" + suffix, l3_offset, feature_count, 3, 1, 1, 0.1);
-    auto l3_fea = helper.makeDeformableConv2dLeakyReLU("pcd_align.L3_dcnpack" + suffix, f1[2], l3_offset, feature_count, 3, 1, 1, deformable_groups, 0.1);
+      // L3_offset = torch.cat([fea1[2], fea2[2]], dim=1)
+      // L3_offset = self.lrelu(self.L3_offset_conv1_1(L3_offset))
+      // L3_offset = self.lrelu(self.L3_offset_conv2_1(L3_offset))
+      // L3_fea = self.lrelu(self.L3_dcnpack_1(fea1[2], L3_offset))
+      auto l3_offset = helper.makeConcatenation({f1[2], f2[2]}, 1);
+           l3_offset = helper.makeConv2dLeakyReLU("pcd_align.L3_offset_conv1" + suffix, l3_offset, feature_count, 3, 1, 1, 0.1);
+           l3_offset = helper.makeConv2dLeakyReLU("pcd_align.L3_offset_conv2" + suffix, l3_offset, feature_count, 3, 1, 1, 0.1);
+      auto l3_fea = helper.makeDeformableConv2dLeakyReLU("pcd_align.L3_dcnpack" + suffix, f1[2], l3_offset, feature_count, 3, 1, 1, deformable_groups, 0.1);
 
-    //  L2_offset = torch.cat([fea1[1], fea2[1]], dim=1)
-    //  L2_offset = self.lrelu(self.L2_offset_conv1_1(L2_offset))
-    //  L3_offset = F.interpolate(
-    //      L3_offset, scale_factor=2, mode='bilinear', align_corners=False)
-    //  L2_offset = self.lrelu(self.L2_offset_conv2_1(
-    //      torch.cat([L2_offset, L3_offset * 2], dim=1)))
-    //  L2_offset = self.lrelu(self.L2_offset_conv3_1(L2_offset))
-    //  L2_fea = self.L2_dcnpack_1(fea1[1], L2_offset)
-    //  L3_fea = F.interpolate(L3_fea, scale_factor=2,
-    //                         mode='bilinear', align_corners=False)
-    //  L2_fea = self.lrelu(self.L2_fea_conv_1(
-    //      torch.cat([L2_fea, L3_fea], dim=1)))
-    auto l2_offset = helper.makeConcatenation({f1[1], f2[1]}, 1);
-         l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv1" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
-         l3_offset = helper.makeBilinearResize(l3_offset, 2);
-         l3_offset = helper.makeElementWiseConstant(l3_offset, nvinfer1::ElementWiseOperation::kPROD, 2);
-         l2_offset = helper.makeConcatenation({l2_offset, l3_offset}, 1);
-         l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv2" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
-         l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv3" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
-    auto l2_fea = helper.makeDeformableConv2d("pcd_align.L2_dcnpack" + suffix, f1[1], l2_offset, feature_count, 3, 1, 1, deformable_groups);
-         l3_fea = helper.makeBilinearResize(l3_fea, 2);
-         l2_fea = helper.makeConcatenation({l2_fea, l3_fea}, 1);
-         l2_fea = helper.makeConv2dLeakyReLU("pcd_align.L2_fea_conv" + suffix, l2_fea, feature_count, 3, 1, 1, 0.1);
+      //  L2_offset = torch.cat([fea1[1], fea2[1]], dim=1)
+      //  L2_offset = self.lrelu(self.L2_offset_conv1_1(L2_offset))
+      //  L3_offset = F.interpolate(
+      //      L3_offset, scale_factor=2, mode='bilinear', align_corners=False)
+      //  L2_offset = self.lrelu(self.L2_offset_conv2_1(
+      //      torch.cat([L2_offset, L3_offset * 2], dim=1)))
+      //  L2_offset = self.lrelu(self.L2_offset_conv3_1(L2_offset))
+      //  L2_fea = self.L2_dcnpack_1(fea1[1], L2_offset)
+      //  L3_fea = F.interpolate(L3_fea, scale_factor=2,
+      //                         mode='bilinear', align_corners=False)
+      //  L2_fea = self.lrelu(self.L2_fea_conv_1(
+      //      torch.cat([L2_fea, L3_fea], dim=1)))
+      auto l2_offset = helper.makeConcatenation({f1[1], f2[1]}, 1);
+           l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv1" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
+           l3_offset = helper.makeBilinearResize(l3_offset, 2);
+           l3_offset = helper.makeElementWiseConstant(l3_offset, nvinfer1::ElementWiseOperation::kPROD, 2);
+           l2_offset = helper.makeConcatenation({l2_offset, l3_offset}, 1);
+           l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv2" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
+           l2_offset = helper.makeConv2dLeakyReLU("pcd_align.L2_offset_conv3" + suffix, l2_offset, feature_count, 3, 1, 1, 0.1);
+      auto l2_fea = helper.makeDeformableConv2d("pcd_align.L2_dcnpack" + suffix, f1[1], l2_offset, feature_count, 3, 1, 1, deformable_groups);
+           l3_fea = helper.makeBilinearResize(l3_fea, 2);
+           l2_fea = helper.makeConcatenation({l2_fea, l3_fea}, 1);
+           l2_fea = helper.makeConv2dLeakyReLU("pcd_align.L2_fea_conv" + suffix, l2_fea, feature_count, 3, 1, 1, 0.1);
 
-    auto l1_offset = helper.makeConcatenation({f1[0], f2[0]}, 1);
-         l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv1" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
-         l2_offset = helper.makeBilinearResize(l2_offset, 2);
-         l2_offset = helper.makeElementWiseConstant(l2_offset, nvinfer1::ElementWiseOperation::kPROD, 2);
-         l1_offset = helper.makeConcatenation({l1_offset, l2_offset}, 1);
-         l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv2" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
-         l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv3" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
-    auto l1_fea = helper.makeDeformableConv2d("pcd_align.L1_dcnpack" + suffix, f1[0], l1_offset, feature_count, 3, 1, 1, deformable_groups);
-         l2_fea = helper.makeBilinearResize(l2_fea, 2);
-         l1_fea = helper.makeConcatenation({l1_fea, l2_fea}, 1);
-         l1_fea = helper.makeConv2d("pcd_align.L1_fea_conv" + suffix, l1_fea, feature_count, 3, 1, 1);
-
+      auto l1_offset = helper.makeConcatenation({f1[0], f2[0]}, 1);
+           l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv1" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
+           l2_offset = helper.makeBilinearResize(l2_offset, 2);
+           l2_offset = helper.makeElementWiseConstant(l2_offset, nvinfer1::ElementWiseOperation::kPROD, 2);
+           l1_offset = helper.makeConcatenation({l1_offset, l2_offset}, 1);
+           l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv2" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
+           l1_offset = helper.makeConv2dLeakyReLU("pcd_align.L1_offset_conv3" + suffix, l1_offset, feature_count, 3, 1, 1, 0.1);
+      auto l1_fea = helper.makeDeformableConv2d("pcd_align.L1_dcnpack" + suffix, f1[0], l1_offset, feature_count, 3, 1, 1, deformable_groups);
+           l2_fea = helper.makeBilinearResize(l2_fea, 2);
+           l1_fea = helper.makeConcatenation({l1_fea, l2_fea}, 1);
+           l1_fea = helper.makeConv2d("pcd_align.L1_fea_conv" + suffix, l1_fea, feature_count, 3, 1, 1);
       // clang-format on
       return l1_fea;
     };
@@ -661,41 +649,44 @@ void buildFeatureFusion(nvinfer1::IBuilder *builder,
     feature = helper.makeConv2d("fusion", feature, feature_count, 1, 1, 0);
     feature->setName(OutputFeatureFusion);
     network->markOutput(*feature);
-    feature->setType(ioDataType);
+    feature->setType(ctx.ioDataType);
   }
 
   std::cout << "Done define feature fusion net." << std::endl;
 
-  auto config = prepareConfig(builder);
+  auto config = ctx.prepareConfig();
   //  config->setMaxWorkspaceSize(4096llu * 1024 * 1024);
   config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 8192llu * 1024 * 1024);
 
-  auto profile = builder->createOptimizationProfile();
-  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min, input_width_min});
-  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt, input_width_opt});
-  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max, input_width_max});
-  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min / 2, input_width_min / 2});
-  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt / 2, input_width_opt / 2});
-  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max / 2, input_width_max / 2});
-  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min / 4, input_width_min / 4});
-  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt / 4, input_width_opt / 4});
-  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max / 4, input_width_max / 4});
-  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min, input_width_min});
-  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt, input_width_opt});
-  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max, input_width_max});
-  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min / 2, input_width_min / 2});
-  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt / 2, input_width_opt / 2});
-  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max / 2, input_width_max / 2});
-  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_fusion, feature_count, input_height_min / 4, input_width_min / 4});
-  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_fusion, feature_count, input_height_opt / 4, input_width_opt / 4});
-  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_fusion, feature_count, input_height_max / 4, input_width_max / 4});
+  // clang-format off
+  auto profile = ctx.builder->createOptimizationProfile();
+  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min, ctx.config.input_width.min});
+  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt, ctx.config.input_width.opt});
+  profile->setDimensions(InputFeatureFusion[0], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max, ctx.config.input_width.max});
+  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min / 2, ctx.config.input_width.min / 2});
+  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt / 2, ctx.config.input_width.opt / 2});
+  profile->setDimensions(InputFeatureFusion[1], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max / 2, ctx.config.input_width.max / 2});
+  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min / 4, ctx.config.input_width.min / 4});
+  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt / 4, ctx.config.input_width.opt / 4});
+  profile->setDimensions(InputFeatureFusion[2], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max / 4, ctx.config.input_width.max / 4});
+  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min, ctx.config.input_width.min});
+  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt, ctx.config.input_width.opt});
+  profile->setDimensions(InputFeatureFusion[3], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max, ctx.config.input_width.max});
+  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min / 2, ctx.config.input_width.min / 2});
+  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt / 2, ctx.config.input_width.opt / 2});
+  profile->setDimensions(InputFeatureFusion[4], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max / 2, ctx.config.input_width.max / 2});
+  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_fusion.min, feature_count, ctx.config.input_height.min / 4, ctx.config.input_width.min / 4});
+  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_fusion.opt, feature_count, ctx.config.input_height.opt / 4, ctx.config.input_width.opt / 4});
+  profile->setDimensions(InputFeatureFusion[5], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_fusion.max, feature_count, ctx.config.input_height.max / 4, ctx.config.input_width.max / 4});
   config->addOptimizationProfile(profile);
+  // clang-format on
 
-  auto modelStream = builder->buildSerializedNetwork(*network, *config);
+  auto modelStream = ctx.builder->buildSerializedNetwork(*network, *config);
 
   std::cout << "Done build feature fusion net." << std::endl;
 
-  std::ofstream p("models/feature_fusion.engine", std::ios::binary);
+//  std::ofstream p("models/feature_fusion.engine", std::ios::binary);
+  std::ofstream p(save_path, std::ios::binary);
   COND_CHECK(p.is_open(), "Unable to open engine file.");
   p.write(static_cast<const char *>(modelStream->data()), modelStream->size());
   p.close();
@@ -705,7 +696,7 @@ void buildFeatureFusion(nvinfer1::IBuilder *builder,
 const char *InputMutualCycle[] = {"lf0", "lf1", "lf2"};
 const char *OutputMutualCycle[] = {"h0", "h1", "h2"};
 
-void buildMutualCycle(nvinfer1::IBuilder *builder) {
+void buildMutualCycle(OptimizationContext &ctx, const std::string &model_path, const std::string &save_path) {
   //  auto network = builder->createNetworkV2(1u << uint32_t(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
   //  NetworkDefinitionHelper helper{network, weights};
   //
@@ -735,12 +726,11 @@ void buildMutualCycle(nvinfer1::IBuilder *builder) {
   //                                  0);
   //  l_feats = helper.makeConv2dLeakyReLU("merge.0", l_feats, feature_count, 1, 1, 1, 0.1);
 
-  auto network = builder->createNetworkV2(1u << uint32_t(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
+  auto network = ctx.createNetwork();
   {
     auto parser = nvonnxparser::createParser(*network, gLogger);
-    //    parser->parseFromFile("model_src/cycmunet-mc-simp-dy-processed.onnx", 1);
-    parser->parseFromFile("model_src/cycmunet-mu-dy-processed.onnx", 1);
-    //    parser->parseFromFile("models/cycmunet-mc-dy-sized-13.onnx", 1);
+//    parser->parseFromFile("model_src/cycmunet-mu-dy-processed.onnx", 1);
+    parser->parseFromFile(model_path.c_str(), 1);
 
     network->getInput(0)->setName(InputMutualCycle[0]);
     network->getInput(1)->setName(InputMutualCycle[1]);
@@ -748,36 +738,38 @@ void buildMutualCycle(nvinfer1::IBuilder *builder) {
     network->getOutput(0)->setName(OutputMutualCycle[0]);
     network->getOutput(1)->setName(OutputMutualCycle[1]);
 
-    network->getInput(0)->setType(ioDataType);
-    network->getInput(1)->setType(ioDataType);
-    network->getInput(2)->setType(ioDataType);
-    network->getOutput(0)->setType(ioDataType);
-    network->getOutput(1)->setType(ioDataType);
+    network->getInput(0)->setType(ctx.ioDataType);
+    network->getInput(1)->setType(ctx.ioDataType);
+    network->getInput(2)->setType(ctx.ioDataType);
+    network->getOutput(0)->setType(ctx.ioDataType);
+    network->getOutput(1)->setType(ctx.ioDataType);
   }
 
   std::cout << "Done define mutual cycle net." << std::endl;
-  auto config = prepareConfig(builder);
-  //  config->setMaxWorkspaceSize(12llu * 1024 * 1024 * 1024);
-  //    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 12llu * 1024 * 1024 * 1024);
+  auto config = ctx.prepareConfig();
+  // config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 12llu * 1024 * 1024 * 1024);
 
-  auto profile = builder->createOptimizationProfile();
-  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_cycle, feature_count, input_height_min, input_width_min});
-  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_cycle, feature_count, input_height_opt, input_width_opt});
-  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_cycle, feature_count, input_height_max, input_width_max});
-  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_cycle, feature_count, input_height_min, input_width_min});
-  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_cycle, feature_count, input_height_opt, input_width_opt});
-  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_cycle, feature_count, input_height_max, input_width_max});
-  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{batch_cycle, feature_count, input_height_min, input_width_min});
-  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{batch_cycle, feature_count, input_height_opt, input_width_opt});
-  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{batch_cycle, feature_count, input_height_max, input_width_max});
+  // clang-format off
+  auto profile = ctx.builder->createOptimizationProfile();
+  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_cycle.min, ctx.config.feature_count, ctx.config.input_height.min, ctx.config.input_width.min});
+  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_cycle.opt, ctx.config.feature_count, ctx.config.input_height.opt, ctx.config.input_width.opt});
+  profile->setDimensions(InputMutualCycle[0], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_cycle.max, ctx.config.feature_count, ctx.config.input_height.max, ctx.config.input_width.max});
+  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_cycle.min, ctx.config.feature_count, ctx.config.input_height.min, ctx.config.input_width.min});
+  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_cycle.opt, ctx.config.feature_count, ctx.config.input_height.opt, ctx.config.input_width.opt});
+  profile->setDimensions(InputMutualCycle[1], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_cycle.max, ctx.config.feature_count, ctx.config.input_height.max, ctx.config.input_width.max});
+  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ctx.config.batch_cycle.min, ctx.config.feature_count, ctx.config.input_height.min, ctx.config.input_width.min});
+  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ctx.config.batch_cycle.opt, ctx.config.feature_count, ctx.config.input_height.opt, ctx.config.input_width.opt});
+  profile->setDimensions(InputMutualCycle[2], nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ctx.config.batch_cycle.max, ctx.config.feature_count, ctx.config.input_height.max, ctx.config.input_width.max});
   config->addOptimizationProfile(profile);
+// clang-format on
 
-  auto modelStream = builder->buildSerializedNetwork(*network, *config);
+  auto modelStream = ctx.builder->buildSerializedNetwork(*network, *config);
   COND_CHECK(modelStream->data() != nullptr, "No model build output.");
 
   std::cout << "Done build mutual cycle net." << std::endl;
 
-  std::ofstream p("models/mutual_cycle.engine", std::ios::binary);
+//  std::ofstream p("models/mutual_cycle.engine", std::ios::binary);
+  std::ofstream p(save_path, std::ios::binary);
   COND_CHECK(p.is_open(), "Unable to open engine file.");
   p.write(static_cast<const char *>(modelStream->data()), modelStream->size());
   p.close();
@@ -802,54 +794,35 @@ void buildMutualCycle(nvinfer1::IBuilder *builder) {
 //       |
 // HR of input
 
-nvinfer1::ICudaEngine *loadModel(nvinfer1::IRuntime *runtime, const std::string &path) {
-  std::ifstream file(path, std::ios::binary);
-  COND_CHECK(file.good(), "can't open engine file.");
+bool optimize(OptimizationConfig config) {
+  UDOLayers::registerPlugins();
 
-  file.seekg(0, std::ifstream::end);
-  auto size = file.tellg();
-  file.seekg(0, std::ifstream::beg);
-  auto modelStream = std::make_unique<char[]>(size);
-  COND_CHECK(modelStream, "Alloc " << size << " bytes failed.");
-  file.read(modelStream.get(), size);
-  file.close();
+  OptimizationContext ctx {};
+  ctx.config = config;
+  ctx.ioDataType = ctx.config.use_fp16 ? nvinfer1::DataType::kHALF : nvinfer1::DataType::kFLOAT;
 
-  auto engine = runtime->deserializeCudaEngine(modelStream.get(), size);
-  COND_CHECK(runtime, "failed deserializing engine");
+  ctx.builder = nvinfer1::createInferBuilder(gLogger);
+  ctx.weights = loadWeights("model_src/weights.pb");
+  std::cout << "Weights loaded." << std::endl;
 
-  return engine;
+  ctx.init_cache();
+
+  buildFeatureExtract(ctx, "model_src/cycmunet-fe-dy-processed.onnx", "models/feature_extract.engine");
+  buildFeatureFusion(ctx, "models/feature_fusion.engine");
+  buildMutualCycle(ctx, "model_src/cycmunet-mu-dy-processed.onnx", "models/mutual_cycle.engine");
+
+  ctx.save_cache();
+
+  return true;
 }
 
 int main() {
-  UDOLayers::registerPlugins();
+  OptimizationConfig config {
+        320, 180,
+        2, 1, 1,
+        64, 8,
+        false
+  };
 
-  auto builder = nvinfer1::createInferBuilder(gLogger);
-  auto runtime = nvinfer1::createInferRuntime(gLogger);
-
-  auto weights = loadWeights("model_src/weights.pb");
-
-  std::cout << "Weights loaded." << std::endl;
-
-  buildFeatureExtract(builder, weights);
-  //  loadModel(runtime, "models/feature_extract.engine")->createExecutionContext();
-  buildFeatureFusion(builder, weights);
-  //  loadModel(runtime, "models/feature_fusion.engine")->createExecutionContext();
-
-  constexpr size_t input_count = input_height * input_width;
-  constexpr size_t input_feature = input_count * feature_count;
-  void *extractBindings[4] = {};
-  void **extractInput = extractBindings;
-  void **extractOutput = extractBindings + 1;
-  constexpr size_t eSize = use_fp16 ? 2 : 4;
-
-  //  cudaStream_t stream;
-  //  CUDA_CHECK(cudaStreamCreate(&stream));
-  //  CUDA_CHECK(cudaMallocAsync(&extractInput[0], batch_extract * input_count * 3 * eSize, stream));
-  //  CUDA_CHECK(cudaMallocAsync(&extractOutput[0], batch_extract * input_feature * eSize, stream));
-  //  CUDA_CHECK(cudaMallocAsync(&extractOutput[1], batch_extract * input_feature / 4 * feature_count * eSize, stream));
-  //  CUDA_CHECK(cudaMallocAsync(&extractOutput[2], batch_extract * input_feature / 16 * feature_count * eSize, stream));
-
-  buildMutualCycle(builder);
-
-  save_cache();
+  COND_CHECK(optimize(config), "Build failed");
 }

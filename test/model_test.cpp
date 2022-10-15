@@ -8,7 +8,6 @@
 #include <string>
 
 #include "NvInfer.h"
-#include "cuda_fp16.h"
 #include "cuda_runtime_api.h"
 #include "logging.h"
 
@@ -16,7 +15,7 @@
 #include "md_view.h"
 #include "gtest/gtest.h"
 
-#include "reveal.h"
+#define TEST_PATH "./module/"
 
 #define CUDA_CHECK(status) ASSERT_EQ(status, cudaSuccess)
 #define COND_CHECK(cond, message) ASSERT_TRUE(cond)
@@ -92,7 +91,7 @@ void compare(md_view<T, N> &actual, md_view<T, N> &expect, double epsilon, const
     buf << "]";
     EXPECT_NEAR(actual.data[i], expect.data[i], epsilon) << path << ": mismatch happened at " << buf.str();
 
-    float diff = fabs(actual.data[i] - expect.data[i]);
+    float diff = std::abs(actual.data[i] - expect.data[i]);
     total += diff;
     max = diff > max ? diff : max;
   }
@@ -130,7 +129,7 @@ TEST(ModelTest, FeatureExtract) {
 
   auto input_buffer = std::make_unique<F[]>(inputs[0].size());
   inputs[0].data = input_buffer.get();
-  loadFile("./testdata/fe_i0.bin", inputs[0]);
+  loadFile(TEST_PATH "fe_i0.bin", inputs[0]);
 
   auto output_buffer = std::make_unique<F[]>(outputs[0].size() + outputs[1].size() + outputs[2].size());
   outputs[0].data = output_buffer.get();
@@ -167,9 +166,9 @@ TEST(ModelTest, FeatureExtract) {
   references[1].data = reference_buffer.get() + references[0].size();
   references[2].data = reference_buffer.get() + references[0].size() + references[1].size();
 
-  loadFile("./testdata/fe_o0.bin", references[0]);
-  loadFile("./testdata/fe_o1.bin", references[1]);
-  loadFile("./testdata/fe_o2.bin", references[2]);
+  loadFile(TEST_PATH "fe_o0.bin", references[0]);
+  loadFile(TEST_PATH "fe_o1.bin", references[1]);
+  loadFile(TEST_PATH "fe_o2.bin", references[2]);
 
   compare(outputs[0], references[0], eSize == 2 ? EpsilonHalf : Epsilon, "output0");
   compare(outputs[1], references[1], eSize == 2 ? EpsilonHalf : Epsilon, "output1");
@@ -213,9 +212,9 @@ TEST(ModelTest, FeatureFusion) {
   inputs[0].data = input_buffer.get();
   inputs[1].data = input_buffer.get() + inputs[0].size();
   inputs[2].data = input_buffer.get() + inputs[0].size() + inputs[1].size();
-  loadFile("./testdata/fe_o0.bin", inputs[0]);
-  loadFile("./testdata/fe_o1.bin", inputs[1]);
-  loadFile("./testdata/fe_o2.bin", inputs[2]);
+  loadFile(TEST_PATH "fe_o0.bin", inputs[0]);
+  loadFile(TEST_PATH "fe_o1.bin", inputs[1]);
+  loadFile(TEST_PATH "fe_o2.bin", inputs[2]);
 
   auto output_buffer = std::make_unique<F[]>(outputs[0].size());
   outputs[0].data = output_buffer.get();
@@ -249,7 +248,7 @@ TEST(ModelTest, FeatureFusion) {
   auto reference_buffer = std::make_unique<F[]>(references[0].size());
   references[0].data = reference_buffer.get();
 
-  loadFile("./testdata/ff_o0.bin", references[0]);
+  loadFile(TEST_PATH "ff_o0.bin", references[0]);
 
   compare(outputs[0], references[0], sizeof(F) == 2 ? EpsilonHalf : Epsilon, "output0");
 }
@@ -287,8 +286,8 @@ TEST(ModelTest, MutualCycle) {
   auto input_buffer = std::make_unique<F[]>(inputs[0].size() * 3);
   inputs[0].data = input_buffer.get();
   inputs[1].data = input_buffer.get() + inputs[0].size();
-  loadFile("./testdata/fe_o0.bin", inputs[0]);
-  loadFile("./testdata/ff_o0.bin", inputs[1]);
+  loadFile(TEST_PATH "fe_o0.bin", inputs[0]);
+  loadFile(TEST_PATH "ff_o0.bin", inputs[1]);
 
   auto output_buffer = std::make_unique<F[]>(outputs[0].size() + outputs[1].size());
   outputs[0].data = output_buffer.get();
@@ -323,8 +322,8 @@ TEST(ModelTest, MutualCycle) {
   references[0].data = reference_buffer.get();
   references[1].data = reference_buffer.get() + references[0].size();
 
-  loadFile("./testdata/mu_o0.bin", references[0]);
-  loadFile("./testdata/mu_o1.bin", references[1]);
+  loadFile(TEST_PATH "mu_o0.bin", references[0]);
+  loadFile(TEST_PATH "mu_o1.bin", references[1]);
 
   compare(outputs[0], references[0], eSize == 2 ? EpsilonHalf : Epsilon, "output0");
   compare(outputs[1], references[1], eSize == 2 ? EpsilonHalf : Epsilon, "output1");

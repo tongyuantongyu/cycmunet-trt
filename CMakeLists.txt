@@ -21,8 +21,6 @@ if (CUDA_DEVICE_DEBUG)
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
-#set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -Xptxas -v")
-
 if(MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/source-charset:utf-8 /execution-charset:us-ascii>")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/source-charset:utf-8$<SEMICOLON>/execution-charset:us-ascii>)
@@ -54,7 +52,7 @@ target_link_libraries(_dcn_layer_impl CUDA::cublas)
 add_executable(dcn_layer_test layers/test/dcn_layer_test.cpp)
 target_include_directories(dcn_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/layers/include/internal)
 target_link_libraries(dcn_layer_test _dcn_layer_impl CUDA::cudart GTest::gtest_main)
-add_test(NAME dcn_layer_test COMMAND dcn_layer_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/layers/test)
+add_test(NAME dcn_layer_test COMMAND dcn_layer_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/testdata)
 
 option(AUTO_REGISTER_PLUGIN "Automatically register plugin on load of shared library" ON)
 add_library(trt_layers_plugin SHARED
@@ -80,20 +78,18 @@ add_library(weights_pb OBJECT ${PROTO_SRCS} ${PROTO_HDRS})
 target_link_libraries(weights_pb protobuf::libprotobuf)
 target_include_directories(weights_pb INTERFACE ${CMAKE_CURRENT_BINARY_DIR})
 
-add_executable(optimizer optimizer.cpp)
+add_executable(optimizer src/optimize.cpp)
 target_link_libraries(optimizer PRIVATE trt_layers_plugin weights_pb CUDA::cudart TensorRT::NvInfer TensorRT::OnnxParser)
 
-set(INFERENCE_SOURCES inference.cpp image-utils.h)
-if(WIN32)
-    set(INFERENCE_SOURCES ${INFERENCE_SOURCES} image-wic.cpp)
-endif()
-add_executable(inference ${INFERENCE_SOURCES})
-target_compile_definitions(inference PRIVATE USE_FP32=1)
-target_link_libraries(inference PRIVATE trt_layers_plugin CUDA::cudart TensorRT::NvInfer)
-if(WIN32)
-    target_link_libraries(inference PRIVATE shlwapi windowscodecs)
-endif()
+add_library(cycmunet SHARED include/config.h include/inference.h src/inference.cpp)
+target_link_libraries(cycmunet PRIVATE TensorRT::NvInfer)
+target_link_libraries(cycmunet PUBLIC trt_layers_plugin CUDA::cudart)
+
+add_executable(cycmunet_demo app/inference_demo.cpp)
+target_link_libraries(cycmunet_demo PRIVATE cycmunet)
 
 add_executable(model_test test/model_test.cpp)
 target_link_libraries(model_test trt_layers_plugin CUDA::cudart TensorRT::NvInfer GTest::gtest)
-add_test(NAME model_test COMMAND model_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
+add_test(NAME model_test COMMAND model_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/testdata)
+
+

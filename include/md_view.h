@@ -14,7 +14,7 @@ typedef int64_t offset_t;
 
 template<class T, std::size_t DIMS>
 struct simple_array {
-  T _d[DIMS];
+  T _d[DIMS] {};
 
   constexpr util_attrs T &operator[](std::size_t i) {
     return this->_d[i];
