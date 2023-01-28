@@ -147,6 +147,17 @@ void RunTest(const std::string &file_prefix, DCNLayerInput<float> &inputs, DCNLa
   }
 
   std::cerr << "Diff: max " << max << ", avg " << total / double(oshape.count()) << std::endl;
+
+  ASSERT_EQ(cublasDestroy_v2(cublas), CUBLAS_STATUS_SUCCESS);
+
+  CUDA_CHECK(cudaFree((void *) inputs.input.data));
+  CUDA_CHECK(cudaFree((void *) inputs.offset.data));
+  CUDA_CHECK(cudaFree((void *) inputs.mask.data));
+  CUDA_CHECK(cudaFree((void *) inputs.weight.data));
+  CUDA_CHECK(cudaFree((void *) inputs.bias.data));
+  CUDA_CHECK(cudaFree((void *) inputs.im2col_buffer.data));
+
+  CUDA_CHECK(cudaFree((void *) outputs.output.data));
 }
 
 void RunTest(const std::string &file_prefix, DCNLayerInput<half> &inputs, DCNLayerOutput<half> &outputs, DCNLayerConfig &config, int repeat = 1) {
@@ -207,6 +218,17 @@ void RunTest(const std::string &file_prefix, DCNLayerInput<half> &inputs, DCNLay
   }
 
   std::cerr << "Diff: max " << max << ", avg " << total / double(oshape.count()) << std::endl;
+
+  ASSERT_EQ(cublasDestroy_v2(cublas), CUBLAS_STATUS_SUCCESS);
+
+  CUDA_CHECK(cudaFree((void *) inputs.input.data));
+  CUDA_CHECK(cudaFree((void *) inputs.offset.data));
+  CUDA_CHECK(cudaFree((void *) inputs.mask.data));
+  CUDA_CHECK(cudaFree((void *) inputs.weight.data));
+  CUDA_CHECK(cudaFree((void *) inputs.bias.data));
+  CUDA_CHECK(cudaFree((void *) inputs.im2col_buffer.data));
+
+  CUDA_CHECK(cudaFree((void *) outputs.output.data));
 }
 
 TEST(DCNLayerTest, SmallInput) {
@@ -256,7 +278,10 @@ TEST(DCNLayerTest, RealCase) {
       0,
       0};
 
-  RunTest("./real/", input, output, config, 20);
+  for (int i = 0; i < 1000; ++i) {
+    RunTest("./real/", input, output, config, 100);
+  }
+
 }
 
 TEST(DCNLayerTest, RealCaseHalf) {

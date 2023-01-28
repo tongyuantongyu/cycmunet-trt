@@ -19,11 +19,11 @@ namespace {
 PluginRegistrar<nvinfer1::DCNLayerPluginCreator> _mDCNLayerPluginCreator{};
 }
 
-bool PLUGIN_EXPORT registerDCNLayerPlugin() {
+bool registerDCNLayerPlugin() {
   return getPluginRegistry()->registerCreator(_mDCNLayerPluginCreator.instance, "");
 }
 
-bool PLUGIN_EXPORT registerPlugins() {
+bool registerPlugins() {
   return registerDCNLayerPlugin();
 }
 

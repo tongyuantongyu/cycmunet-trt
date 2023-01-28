@@ -2,8 +2,6 @@
 
 #include <cstdint>
 
-#include <NvInfer.h>
-
 #include "utils.h"
 
 struct optimization_axis {
@@ -13,16 +11,23 @@ struct optimization_axis {
   int32_t min, opt, max;
 };
 
+enum IOFormat {
+  RGB,
+  YUV420,
+};
+
 struct OptimizationConfig {
   optimization_axis input_width;
   optimization_axis input_height;
 
   optimization_axis batch_extract;
   optimization_axis batch_fusion;
-  optimization_axis batch_cycle;
 
   int32_t feature_count;
-  int32_t deformable_groups;
+
+  float scale_factor;
+  IOFormat format;
+  int32_t extraction_layers;
 
   bool use_fp16;
 };
@@ -33,9 +38,12 @@ struct InferenceConfig {
 
   int32_t batch_extract;
   int32_t batch_fusion;
-  int32_t batch_cycle;
 
   int32_t feature_count;
+
+  float scale_factor;
+  IOFormat format;
+  int32_t extraction_layers;
 
   bool use_fp16;
 };

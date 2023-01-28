@@ -5,7 +5,7 @@
 #include "NvInfer.h"
 #include "config.h"
 
-#define PLUGIN_NAME "DCNLayer"
+#define PLUGIN_NAME "DeformConv2d"
 
 namespace nvinfer1 {
 class DCNLayerPlugin : public IPluginV2DynamicExt {

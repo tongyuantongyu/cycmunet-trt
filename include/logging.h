@@ -241,10 +241,12 @@ public:
     //! Note samples should not be calling this function directly; it will eventually go away once we eliminate the
     //! inheritance from nvinfer1::ILogger
     //!
-    void log(Severity severity, const char* msg) noexcept override
-    {
+    void log(Severity severity, const char* msg) noexcept override {
         std::lock_guard gd(mu);
         LogStreamConsumer(mReportableSeverity, severity) << "[TRT] " << std::string(msg) << std::endl;
+        if (severity <= Severity::kERROR) {
+        std::exit(2);
+        }
     }
 
     //!

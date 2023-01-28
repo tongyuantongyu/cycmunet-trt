@@ -42,9 +42,9 @@ half __device__ ceil(const half f) {
   return hceil(f);
 }
 
-// Get data from coordination. Use bilinear interpolation.
+// Gather data from coordination. Use bilinear interpolation.
 template<class F>
-static inline F __device__ DCNGetData(const md_view<const F, 4> &input,
+static inline F __device__ DCNGather(const md_view<const F, 4> &input,
                                       offset_t n,
                                       offset_t c,
                                       hw<offset_t> pos,
@@ -87,61 +87,27 @@ static inline F __device__ DCNGetData(const md_view<const F, 4> &input,
 }
 
 // Gather data from input into matrix form.
-template<class F>
-static void __global__ DCNIm2colKernel(md_view<const F, 4> input,
-                                       md_view<const F, 7> offset,
-                                       md_view<const F, 6> mask,
-                                       md_view<F, 6> col,
-                                       im2col_parameters p,
-                                       offset_t count) {
+template<class F, uint32_t K>
+static void __global__ DCNIm2colKernel(md_view<const F, 4> input, md_view<const F, 7> offset, md_view<const F, 6> mask,
+                                       md_view<F, 6> col, im2col_parameters p, offset_t count) {
   offset_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= count) {
-    return;
-  }
+  if (idx >= count) { return; }
 
-  const auto [n, c, h, w] = col.shape.template slice<0, 4>().indexes(idx);
+  const auto [n, c, h, w] = col.shape.template gather<0, 1, 4, 5>().indexes(idx);
   // kernel h, w
-  const auto [kh, kw] = col.shape.template slice<4, 2>();
+  const auto [kh, kw] = col.shape.template slice<2, 2>();
   // index of deformable group
   const auto g = c / p.channel_per_deformable_group;
   // input h, w base offset
   const auto hin = h * p.stride.h - p.padding.h;
   const auto win = w * p.stride.w - p.padding.w;
 
+#pragma unroll K
   for (uint32_t i = 0; i < uint32_t(kh); ++i) {
+#pragma unroll K
     for (uint32_t j = 0; j < uint32_t(kw); ++j) {
-      F data = DCNGetData(input,
-                          n,
-                          c,
-                          {hin + i * p.dilation.h, win + j * p.dilation.w},
-                          {offset.at(n, g, i, j, 0, h, w), offset.at(n, g, i, j, 1, h, w)});
-      col.at(n, c, i, j, h, w) = data * mask.at(n, g, i, j, h, w);
-    }
-  }
-}
-
-template<class F>
-static void __global__ DCNIm2colKernel3111(md_view<const F, 4> input,
-                                           md_view<const F, 7> offset,
-                                           md_view<const F, 6> mask,
-                                           md_view<F, 6> col,
-                                           int32_t channel_per_deformable_group,
-                                           offset_t count) {
-  offset_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  const auto [n, c, h, w] = col.shape.template gather<0, 1, 4, 5>().indexes(idx);
-  // index of deformable group
-  const auto g = c / channel_per_deformable_group;
-  // input h, w base offset
-  const auto hin = h - 1;
-  const auto win = w - 1;
-
-  for (uint32_t i = 0; i < 3; ++i) {
-    for (uint32_t j = 0; j < 3; ++j) {
-      F data = DCNGetData(input, n, c, {hin + i, win + j}, {offset.at(n, g, i, j, 0, h, w), offset.at(n, g, i, j, 1, h, w)});
+      F data = DCNGather(input, n, c, {hin + i * p.dilation.h, win + j * p.dilation.w},
+                         {offset.at(n, g, i, j, 0, h, w), offset.at(n, g, i, j, 1, h, w)});
       col.at(n, c, i, j, h, w) = data * mask.at(n, g, i, j, h, w);
     }
   }
@@ -269,32 +235,27 @@ void compute(DCNLayerInput<F> inputs,
              DCNLayerConfig config,
              DCNLayerExtra extra,
              cudaStream_t stream) {
+  assert(cudaGetLastError() == cudaSuccess);
   std::size_t count = inputs.im2col_buffer.shape.template gather<0, 1, 4, 5>().count();
   auto blocks = (count + threadCountIm2Col - 1) / threadCountIm2Col;
 
-  int32_t channel_per_deformable_group = (inputs.input.shape[1] + config.deformable_groups - 1) / config.deformable_groups;
-  if (inputs.weight.shape[2] == 3 && inputs.weight.shape[3] == 3 && config.stride.h == 1 && config.stride.w == 1 && config.padding.h == 1 && config.padding.w == 1 && config.dilation.h == 1 && config.dilation.w == 1) {
-    DCNIm2colKernel3111<<<blocks, threadCountIm2Col, 0, stream>>>(inputs.input,
-                                                                  inputs.offset,
-                                                                  inputs.mask,
-                                                                  inputs.im2col_buffer,
-                                                                  channel_per_deformable_group,
-                                                                  count);
+  im2col_parameters im2col_p{
+      config.stride, config.padding, config.dilation,
+      int32_t((inputs.input.shape[1] + config.deformable_groups - 1) / config.deformable_groups)};
+
+  if (inputs.weight.shape[2] == 3 && inputs.weight.shape[3] == 3) {
+    DCNIm2colKernel<F, 3><<<blocks, threadCountIm2Col, 0, stream>>>(inputs.input, inputs.offset, inputs.mask,
+                                                                    inputs.im2col_buffer, im2col_p, count);
+  }
+  else if (inputs.weight.shape[2] == 1 && inputs.weight.shape[3] == 1) {
+    DCNIm2colKernel<F, 1><<<blocks, threadCountIm2Col, 0, stream>>>(inputs.input, inputs.offset, inputs.mask,
+                                                                    inputs.im2col_buffer, im2col_p, count);
   }
   else {
-    im2col_parameters p{
-        config.stride,
-        config.padding,
-        config.dilation,
-        channel_per_deformable_group};
-
-    DCNIm2colKernel<<<blocks, threadCountIm2Col, 0, stream>>>(inputs.input,
-                                                              inputs.offset,
-                                                              inputs.mask,
-                                                              inputs.im2col_buffer,
-                                                              p,
-                                                              count);
+    DCNIm2colKernel<F, 2><<<blocks, threadCountIm2Col, 0, stream>>>(inputs.input, inputs.offset, inputs.mask,
+                                                                    inputs.im2col_buffer, im2col_p, count);
   }
+
   assert(cudaGetLastError() == cudaSuccess);
 
   const int m = outputs.output.shape.template slice<2, 2>().count();
@@ -358,11 +319,8 @@ void compute(DCNLayerInput<F> inputs,
 
   // Fuse bias and activation, if there are.
   if (config.activation_type != -1) {
-    bias_activation_parameters<F> p{
-        config.activation_type,
-        F{config.alpha},
-        F{config.beta}};
-    BiasActivationKernel<<<blocks, threadCount, 0, stream>>>(outputs.output, inputs.bias, p, count);
+    bias_activation_parameters<F> ba_p{config.activation_type, F{config.alpha}, F{config.beta}};
+    BiasActivationKernel<<<blocks, threadCount, 0, stream>>>(outputs.output, inputs.bias, ba_p, count);
 
     assert(cudaGetLastError() == cudaSuccess);
   }

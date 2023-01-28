@@ -4,8 +4,8 @@
 
 namespace UDOLayers {
 
-bool PLUGIN_EXPORT registerDCNLayerPlugin();
+bool registerDCNLayerPlugin();
 
-bool PLUGIN_EXPORT registerPlugins();
+bool registerPlugins();
 
 }

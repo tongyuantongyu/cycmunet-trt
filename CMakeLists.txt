@@ -5,10 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 20)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64)
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64)
         set(CMAKE_CUDA_ARCHITECTURES 53 62 72)
     else()
-        set(CMAKE_CUDA_ARCHITECTURES 61 75 80)
+        set(CMAKE_CUDA_ARCHITECTURES 61 89)
     endif()
 endif()
 
@@ -17,20 +17,24 @@ project(Cycmunet-TRT LANGUAGES CXX CUDA)
 enable_testing()
 
 option(CUDA_DEVICE_DEBUG "Enable device debug" OFF)
-if (CUDA_DEVICE_DEBUG)
+if(CUDA_DEVICE_DEBUG)
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
 if(MSVC)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/source-charset:utf-8 /execution-charset:us-ascii>")
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/source-charset:utf-8$<SEMICOLON>/execution-charset:us-ascii>)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/source-charset:utf-8 /execution-charset:us-ascii /wd4996>")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/source-charset:utf-8$<SEMICOLON>/execution-charset:us-ascii$<SEMICOLON>/wd4996>)
 endif()
 
 find_package(CUDAToolkit 11.0 REQUIRED COMPONENTS cublas)
-find_package(TensorRT 8.2.0 REQUIRED COMPONENTS OnnxParser)
+find_package(TensorRT 8.5 REQUIRED COMPONENTS OnnxParser)
 find_package(cuDNN REQUIRED)
-find_package(Protobuf 3 REQUIRED)
 find_package(GTest 1 REQUIRED)
+
+option(VAPOURSYNTH_PLUGIN "Enable Vapoursynth plugin" OFF)
+if(VAPOURSYNTH_PLUGIN)
+    find_package(VapourSynth 4 REQUIRED)
+endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -41,11 +45,11 @@ if(CMAKE_BUILD_TYPE MATCHES DEBUG)
 endif()
 
 add_library(_dcn_layer_impl OBJECT
-        ${COMMON_HEADERS}
-        layers/include/internal/config.h
+            ${COMMON_HEADERS}
+            layers/include/internal/config.h
 
-        layers/include/internal/dcn_layer_impl.h
-        layers/impl/dcn_layer.cu)
+            layers/include/internal/dcn_layer_impl.h
+            layers/impl/dcn_layer.cu)
 target_include_directories(_dcn_layer_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/layers/include/internal)
 target_link_libraries(_dcn_layer_impl CUDA::cublas)
 
@@ -54,42 +58,59 @@ target_include_directories(dcn_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/la
 target_link_libraries(dcn_layer_test _dcn_layer_impl CUDA::cudart GTest::gtest_main)
 add_test(NAME dcn_layer_test COMMAND dcn_layer_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/testdata)
 
-option(AUTO_REGISTER_PLUGIN "Automatically register plugin on load of shared library" ON)
-add_library(trt_layers_plugin SHARED
-        ${COMMON_HEADERS}
-        layers/include/internal/config.h
+option(AUTO_REGISTER_PLUGIN "Automatically register plugin on load of shared library" OFF)
+if(AUTO_REGISTER_PLUGIN)
+    add_library(trt_layers_plugin SHARED
+                ${COMMON_HEADERS}
+                layers/include/internal/config.h
 
-        layers/include/internal/dcn_layer.h
-        layers/include/internal/dcn_layer_impl.h
-        layers/src/dcn_layer.cpp
+                layers/include/internal/dcn_layer.h
+                layers/include/internal/dcn_layer_impl.h
+                layers/src/dcn_layer.cpp
 
-        layers/src/layers.cpp)
+                layers/src/layers.cpp)
+    target_compile_definitions(trt_layers_plugin PRIVATE AUTO_REGISTER_PLUGIN)
+else()
+    add_library(trt_layers_plugin STATIC
+                ${COMMON_HEADERS}
+                layers/include/internal/config.h
+
+                layers/include/internal/dcn_layer.h
+                layers/include/internal/dcn_layer_impl.h
+                layers/src/dcn_layer.cpp
+
+                layers/src/layers.cpp)
+endif()
 
 target_compile_definitions(trt_layers_plugin PRIVATE BUILDING_PLUGIN)
-if (AUTO_REGISTER_PLUGIN)
-    target_compile_definitions(trt_layers_plugin PRIVATE AUTO_REGISTER_PLUGIN)
-endif()
 target_include_directories(trt_layers_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/layers/include/internal)
 target_include_directories(trt_layers_plugin PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/layers/include)
-target_link_libraries(trt_layers_plugin PRIVATE _dcn_layer_impl TensorRT::NvInfer)
+target_link_libraries(trt_layers_plugin PUBLIC _dcn_layer_impl TensorRT::NvInfer)
+set_target_properties(trt_layers_plugin PROPERTIES
+                      POSITION_INDEPENDENT_CODE ON)
 
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS weights.proto)
-add_library(weights_pb OBJECT ${PROTO_SRCS} ${PROTO_HDRS})
-target_link_libraries(weights_pb protobuf::libprotobuf)
-target_include_directories(weights_pb INTERFACE ${CMAKE_CURRENT_BINARY_DIR})
+add_library(cycmunet STATIC include/config.h include/optimize.h include/inference.h src/optimize.cpp src/inference.cpp)
+target_link_libraries(cycmunet PUBLIC trt_layers_plugin TensorRT::OnnxParser TensorRT::NvInfer CUDA::cudart)
+set_target_properties(cycmunet PROPERTIES
+                      POSITION_INDEPENDENT_CODE ON)
 
-add_executable(optimizer src/optimize.cpp)
-target_link_libraries(optimizer PRIVATE trt_layers_plugin weights_pb CUDA::cudart TensorRT::NvInfer TensorRT::OnnxParser)
+add_executable(optimizer app/optimizer.cpp)
+target_link_libraries(optimizer PRIVATE cycmunet)
 
-add_library(cycmunet SHARED include/config.h include/inference.h src/inference.cpp)
-target_link_libraries(cycmunet PRIVATE TensorRT::NvInfer)
-target_link_libraries(cycmunet PUBLIC trt_layers_plugin CUDA::cudart)
+add_library(reformat_cuda OBJECT include/reformat.h src/reformat.cu)
 
-add_executable(cycmunet_demo app/inference_demo.cpp)
-target_link_libraries(cycmunet_demo PRIVATE cycmunet)
+add_executable(cycmunet_y4m app/inference_y4m.cpp)
+target_link_libraries(cycmunet_y4m PRIVATE cycmunet reformat_cuda)
 
 add_executable(model_test test/model_test.cpp)
 target_link_libraries(model_test trt_layers_plugin CUDA::cudart TensorRT::NvInfer GTest::gtest)
 add_test(NAME model_test COMMAND model_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/testdata)
 
-
+if(VAPOURSYNTH_PLUGIN)
+    add_library(vs-cycmunet SHARED src/vs-plugin.cpp)
+    target_link_libraries(vs-cycmunet PRIVATE cycmunet reformat_cuda VapourSynth)
+    set_target_properties(vs-cycmunet PROPERTIES
+                          C_VISIBILITY_PRESET hidden
+                          CXX_VISIBILITY_PRESET hidden
+                          CUDA_VISIBILITY_PRESET hidden)
+endif()

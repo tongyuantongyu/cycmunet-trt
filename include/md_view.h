@@ -1,13 +1,10 @@
 #ifndef MDVIEW_H_
 #define MDVIEW_H_
 
-#include <type_traits>
-#include <array>
-#include <numeric>
-#include <functional>
 #include <cstdint>
 #include <cstring>
 #include <cassert>
+#include <utility>
 #include "helper.h"
 
 typedef int64_t offset_t;

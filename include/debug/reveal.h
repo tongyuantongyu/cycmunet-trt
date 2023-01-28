@@ -3,6 +3,7 @@
 #include <fstream>
 #include <memory>
 #include "cuda_runtime_api.h"
+#include "md_view.h"
 
 template<class T, std::size_t D>
 void dump_value(md_view<T, D> t, std::wstring name) {

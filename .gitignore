@@ -70,3 +70,5 @@ _*
 *.pb
 *.engine
 *.cache
+*.y4m
+*.ffindex
