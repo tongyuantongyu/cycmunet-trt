@@ -450,10 +450,12 @@ int main(int argc, char **argv) {
         tensor_ptr = uv_tensor.at(position, i - 1).data;
       }
       if (config.use_fp16) {
-        from_8b<half, uint8_t>({(half *) tensor_ptr, dim}, input_ptrs[i], norm.r[i].a, norm.r[i].b, session.stream);
+        import_pixel<half, uint8_t>({(half *) tensor_ptr, dim}, input_ptrs[i], norm.r[i].a, norm.r[i].b,
+                                    session.stream);
       }
       else {
-        from_8b<float, uint8_t>({(float *) tensor_ptr, dim}, input_ptrs[i], norm.r[i].a, norm.r[i].b, session.stream);
+        import_pixel<float, uint8_t>({(float *) tensor_ptr, dim}, input_ptrs[i], norm.r[i].a, norm.r[i].b,
+                                     session.stream);
       }
     }
   };
@@ -493,12 +495,12 @@ int main(int argc, char **argv) {
         max = input.range ? 255 : 240;
       }
       if (config.use_fp16) {
-        to_8b<half, uint8_t>(output_ptrs[i], {(half *) tensor_ptr, dim}, denorm.r[i].a, denorm.r[i].b, min, max,
-                             session.stream);
+        export_pixel<half, uint8_t>(output_ptrs[i], {(half *) tensor_ptr, dim}, denorm.r[i].a, denorm.r[i].b, min, max,
+                                    session.stream);
       }
       else {
-        to_8b<float, uint8_t>(output_ptrs[i], {(float *) tensor_ptr, dim}, denorm.r[i].a, denorm.r[i].b, min, max,
-                              session.stream);
+        export_pixel<float, uint8_t>(output_ptrs[i], {(float *) tensor_ptr, dim}, denorm.r[i].a, denorm.r[i].b, min,
+                                     max, session.stream);
       }
 
       CUDA_CHECK(cudaMemcpyAsync(frame_out.plane[i], output_ptrs[i].data, output_ptrs[i].size(), cudaMemcpyDeviceToHost,

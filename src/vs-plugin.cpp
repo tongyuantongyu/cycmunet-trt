@@ -206,14 +206,10 @@ std::string CycMuNetFilter::init1(const VSMap *in, VSCore *core, const VSAPI *vs
     return "CycMuNet: only constant format input supported";
   }
 
-  if (vi->format.sampleType != VSSampleType::stInteger) {
-    // TODO support float format
-    return "CycMuNet: only integer format input supported";
-  }
-
   IOFormat format;
   if (vi->format.colorFamily == VSColorFamily::cfRGB) {
     format = IOFormat::RGB;
+    return "CycMuNet: RGB input unimplemented";
   }
   else if (vi->format.colorFamily == VSColorFamily::cfYUV) {
     if (vi->format.subSamplingH == 1 && vi->format.subSamplingW == 1) {
@@ -513,7 +509,12 @@ std::string CycMuNetFilter::init2(const VSFrame *frame, VSCore *core, const VSAP
     }
   }
   else {
-    auto depth = vo.format.bitsPerSample;
+    auto isFloat = vo.format.sampleType == VSSampleType::stFloat;
+    auto depth = isFloat ? 8 : vo.format.bitsPerSample;
+    if (isFloat && cur.r == VSColorRange::VSC_RANGE_LIMITED) {
+      vsapi->logMessage(
+          mtWarning, "CycMuNet: Normalization value for limited range floating point input may be inaccurate.", core);
+    }
 
     if (color_family == VSColorFamily::cfYUV) {
       float kr, kg, kb;
@@ -586,6 +587,13 @@ std::string CycMuNetFilter::init2(const VSFrame *frame, VSCore *core, const VSAP
       uv_max = float(240 << (depth - 8));
       y_min = uv_min = float(16 << (depth - 8));
     }
+    if (isFloat) {
+      auto unorm = float((1 << depth) - 1);
+      y_max /= unorm;
+      y_min /= unorm;
+      uv_max /= unorm;
+      uv_min /= unorm;
+    }
 
     for (int i = 0; i < 3; ++i) {
       float c = (color_family == VSColorFamily::cfRGB) ? (y_max - y_min) : (i == 0 ? y_max - y_min : uv_max - uv_min);
@@ -629,14 +637,14 @@ std::string CycMuNetFilter::readPlane(md_view<F, 2> dst, md_uview<const U, 2> sr
     }
   }
 
-  from_8b<F, U>(dst, cuda_tmp, a, b, session->stream);
+  import_pixel<F, U>(dst, cuda_tmp, a, b, session->stream);
   return "";
 }
 
 template<class F, class U>
 std::string CycMuNetFilter::writePlane(md_uview<U, 2> dst, md_view<const F, 2> src, md_view<U, 2> cuda_tmp, float a,
                                        float b, float min, float max) {
-  to_8b<F, U>(cuda_tmp, src, a, b, min, max, session->stream);
+  export_pixel<F, U>(cuda_tmp, src, a, b, min, max, session->stream);
 
   int err;
   if (dst.is_contiguous()) {
@@ -802,15 +810,23 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
       // TODO RGB loader
     }
     else {
-      if (vo.format.bytesPerSample == 1) {
-        return readYUV<uint8_t>(offset, frame_in, vsapi);
+      if (vo.format.sampleType == VSSampleType::stFloat) {
+        if (vo.format.bytesPerSample == 2) {
+          return readYUV<half>(offset, frame_in, vsapi);
+        }
+        else if (vo.format.bytesPerSample == 4) {
+          return readYUV<float>(offset, frame_in, vsapi);
+        }
+      } else {
+        if (vo.format.bytesPerSample == 1) {
+          return readYUV<uint8_t>(offset, frame_in, vsapi);
+        }
+        else if (vo.format.bytesPerSample == 2) {
+          return readYUV<uint16_t>(offset, frame_in, vsapi);
+        }
       }
-      else if (vo.format.bytesPerSample == 2) {
-        return readYUV<uint16_t>(offset, frame_in, vsapi);
-      }
-      else {
-        return "CycMuNet: unexpected bytes per sample";
-      }
+
+      return "CycMuNet: unexpected format";
     }
 
     return "";
@@ -906,15 +922,23 @@ std::string CycMuNetFilter::extractFrame(int n, VSFrame *&frame, VSCore *core, c
     // TODO RGB extractor
   }
   else {
-    if (vo.format.bytesPerSample == 1) {
-      return writeYUV<uint8_t>(offset, frame, vsapi);
+    if (vo.format.sampleType == VSSampleType::stFloat) {
+      if (vo.format.bytesPerSample == 2) {
+        return writeYUV<half>(offset, frame, vsapi);
+      }
+      else if (vo.format.bytesPerSample == 4) {
+        return writeYUV<float>(offset, frame, vsapi);
+      }
+    } else {
+      if (vo.format.bytesPerSample == 1) {
+        return writeYUV<uint8_t>(offset, frame, vsapi);
+      }
+      else if (vo.format.bytesPerSample == 2) {
+        return writeYUV<uint16_t>(offset, frame, vsapi);
+      }
     }
-    else if (vo.format.bytesPerSample == 2) {
-      return writeYUV<uint16_t>(offset, frame, vsapi);
-    }
-    else {
-      return "CycMuNet: unexpected bytes per sample";
-    }
+
+    return "CycMuNet: unexpected format";
   }
 
   return "";

@@ -1,8 +1,10 @@
 #include "reformat.h"
 #include <cuda_fp16.h>
+#include <type_traits>
 
 half __device__ round(half f) {
-  return hfloor(f + half(0.5));
+  const half v0_5 = float(0.5);
+  return hfloor(f + v0_5);
 }
 
 template<class F, class U>
@@ -35,7 +37,11 @@ static void __global__ fma_to(md_view<U, 2> dst, md_view<const F, 2> src, F a, F
   }
 
   F value = static_cast<F>(src.at(dst_y, dst_x));
-  value = round(a * value + b);
+  value = a * value + b;
+  if constexpr (std::is_integral_v<U>) {
+    value = round(value);
+  }
+
   if (value < min) {
     value = min;
   }
@@ -43,11 +49,15 @@ static void __global__ fma_to(md_view<U, 2> dst, md_view<const F, 2> src, F a, F
     value = max;
   }
 
-  dst.at(dst_y, dst_x) = U(uint16_t(value));
+  if constexpr (std::is_integral_v<U> && sizeof(U) == 1) {
+    dst.at(dst_y, dst_x) = static_cast<U>(static_cast<int16_t>(value));
+  } else {
+    dst.at(dst_y, dst_x) = static_cast<U>(value);
+  }
 }
 
 template<class F, class U>
-void from_8b(md_view<F, 2> dst, md_view<const U, 2> src, float a, float b, cudaStream_t stream) {
+void import_pixel(md_view<F, 2> dst, md_view<const U, 2> src, float a, float b, cudaStream_t stream) {
   dim3 dimBlock(32, 32);
   dim3 dimGrid;
   auto [dst_h, dst_w] = dst.shape;
@@ -57,17 +67,25 @@ void from_8b(md_view<F, 2> dst, md_view<const U, 2> src, float a, float b, cudaS
   fma_from<<<dimGrid, dimBlock, 0, stream>>>(dst, src, F(a), F(b));
 }
 
-template void from_8b<float, uint8_t>(md_view<float, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
+template void import_pixel<float, uint8_t>(md_view<float, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
                                       cudaStream_t stream);
-template void from_8b<half, uint8_t>(md_view<half, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
+template void import_pixel<half, uint8_t>(md_view<half, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
                                      cudaStream_t stream);
-template void from_8b<float, uint16_t>(md_view<float, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
+template void import_pixel<float, uint16_t>(md_view<float, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
                                        cudaStream_t stream);
-template void from_8b<half, uint16_t>(md_view<half, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
+template void import_pixel<half, uint16_t>(md_view<half, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
                                       cudaStream_t stream);
+template void import_pixel<float, half>(md_view<float, 2> dst, md_view<const half, 2> src, float a, float b,
+                                      cudaStream_t stream);
+template void import_pixel<half, half>(md_view<half, 2> dst, md_view<const half, 2> src, float a, float b,
+                                     cudaStream_t stream);
+template void import_pixel<float, float>(md_view<float, 2> dst, md_view<const float, 2> src, float a, float b,
+                                         cudaStream_t stream);
+template void import_pixel<half, float>(md_view<half, 2> dst, md_view<const float, 2> src, float a, float b,
+                                        cudaStream_t stream);
 
 template<class F, class U>
-void to_8b(md_view<U, 2> dst, md_view<const F, 2> src, float a, float b, float min, float max, cudaStream_t stream) {
+void export_pixel(md_view<U, 2> dst, md_view<const F, 2> src, float a, float b, float min, float max, cudaStream_t stream) {
   dim3 dimBlock(32, 32);
   dim3 dimGrid;
   auto [dst_h, dst_w] = dst.shape;
@@ -77,11 +95,19 @@ void to_8b(md_view<U, 2> dst, md_view<const F, 2> src, float a, float b, float m
   fma_to<<<dimGrid, dimBlock, 0, stream>>>(dst, src, F(a), F(b), F(min), F(max));
 }
 
-template void to_8b<float, uint8_t>(md_view<uint8_t, 2> dst, md_view<const float, 2> src, float a, float b, float min,
+template void export_pixel<float, uint8_t>(md_view<uint8_t, 2> dst, md_view<const float, 2> src, float a, float b, float min,
                                     float max, cudaStream_t stream);
-template void to_8b<half, uint8_t>(md_view<uint8_t, 2> dst, md_view<const half, 2> src, float a, float b, float min,
+template void export_pixel<half, uint8_t>(md_view<uint8_t, 2> dst, md_view<const half, 2> src, float a, float b, float min,
                                    float max, cudaStream_t stream);
-template void to_8b<float, uint16_t>(md_view<uint16_t, 2> dst, md_view<const float, 2> src, float a, float b, float min,
+template void export_pixel<float, uint16_t>(md_view<uint16_t, 2> dst, md_view<const float, 2> src, float a, float b, float min,
                                      float max, cudaStream_t stream);
-template void to_8b<half, uint16_t>(md_view<uint16_t, 2> dst, md_view<const half, 2> src, float a, float b, float min,
+template void export_pixel<half, uint16_t>(md_view<uint16_t, 2> dst, md_view<const half, 2> src, float a, float b, float min,
+                                    float max, cudaStream_t stream);
+template void export_pixel<float, half>(md_view<half, 2> dst, md_view<const float, 2> src, float a, float b, float min,
+                                    float max, cudaStream_t stream);
+template void export_pixel<half, half>(md_view<half, 2> dst, md_view<const half, 2> src, float a, float b, float min,
+                                   float max, cudaStream_t stream);
+template void export_pixel<float, float>(md_view<float, 2> dst, md_view<const float, 2> src, float a, float b, float min,
+                                     float max, cudaStream_t stream);
+template void export_pixel<half, float>(md_view<float, 2> dst, md_view<const half, 2> src, float a, float b, float min,
                                     float max, cudaStream_t stream);
