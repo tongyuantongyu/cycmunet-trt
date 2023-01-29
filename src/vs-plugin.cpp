@@ -49,7 +49,7 @@ class Logger : public nvinfer1::ILogger {
   logMessage_t logMessage;
 
   constexpr static VSMessageType typeMap[] = {VSMessageType::mtFatal, VSMessageType::mtWarning,
-                                              VSMessageType::mtWarning, VSMessageType::mtInformation,
+                                              VSMessageType::mtWarning, VSMessageType::mtDebug,
                                               VSMessageType::mtDebug};
 };
 
@@ -142,11 +142,13 @@ const std::array<matrixCoefficientsEntry, 6> matrixCoefficientsTable {{{VSC_MATR
 class CycMuNetFilter {
   int num_frames;
   int loaded_frames;
+  int scene_begin_index, scene_begin_index_pending;
   VSColorFamily color_family;
   std::filesystem::path model_path;
   InferenceConfig config;
   InferenceContext *ctx;
   InferenceSession *session;
+  const VSFrame *first_frame;
   std::vector<const VSFrame *> requested_frames;
   bool raw_norm;
   scale_ratios_t norm, denorm;
@@ -197,6 +199,8 @@ std::string CycMuNetFilter::init1(const VSMap *in, VSCore *core, const VSAPI *vs
   node = vsapi->mapGetNode(in, "clip", 0, nullptr);
   const VSVideoInfo *vi = vsapi->getVideoInfo(node);
   num_frames = vi->numFrames;
+  scene_begin_index = 0;
+  scene_begin_index_pending = num_frames;
 
   if (!vsh::isConstantVideoFormat(vi)) {
     return "CycMuNet: only constant format input supported";
@@ -391,7 +395,7 @@ std::string CycMuNetFilter::init1(const VSMap *in, VSCore *core, const VSAPI *vs
 
 std::string CycMuNetFilter::init2(const VSFrame *frame, VSCore *core, const VSAPI *vsapi) {
   auto frame_prop = vsapi->getFramePropertiesRO(frame);
-  requested_frames[0] = frame;
+  first_frame = frame;
   int err;
 
   color_space_t def, cur;
@@ -613,7 +617,6 @@ std::string CycMuNetFilter::readPlane(md_view<F, 2> dst, md_uview<const U, 2> sr
     }
   }
   else {
-    // TODO: is this efficient?
     for (offset_t i = 0; i < src.shape[0]; ++i) {
       auto line = cuda_tmp.at(i);
       err =
@@ -647,7 +650,6 @@ std::string CycMuNetFilter::writePlane(md_uview<U, 2> dst, md_view<const F, 2> s
     }
   }
   else {
-    // TODO: is this efficient?
     for (offset_t i = 0; i < cuda_tmp.shape[0]; ++i) {
       auto line = cuda_tmp.at(i);
       err =
@@ -772,16 +774,25 @@ std::string CycMuNetFilter::writeYUV(offset_t position, VSFrame *frame, const VS
 void CycMuNetFilter::requestFrames(int n, VSFrameContext *frameCtx, const VSAPI *vsapi) const {
   auto request = [&](int i) { vsapi->requestFrameFilter(i, node, frameCtx); };
 
-  if (n == 0) {
-    request(0);
+  // Get the index of the first frame of current scene
+  auto scene_begin_index_current = n / 2 >= scene_begin_index_pending ? scene_begin_index_pending : scene_begin_index;
+  auto scene_begin_index_next = n / 2 >= scene_begin_index_pending ? num_frames : scene_begin_index_pending;
+
+  if (n / 2 == scene_begin_index_current && n % 2 == 0) {
+    request(scene_begin_index_current);
   }
 
   int begin = n / 2 + 1;
-  auto batch_begin = n - (n % (2 * config.batch_extract));
-  int end = std::min((batch_begin / 2 + 1) + config.batch_extract, num_frames);
-  begin = (begin != end ? begin : begin - 1);
-  for (int i = begin; i < end; ++i) {
-    request(i);
+  auto batch_begin = n - ((n - 2 * scene_begin_index_current) % (2 * config.batch_extract));
+  int end = std::min((batch_begin / 2 + 1) + config.batch_extract, scene_begin_index_next);
+  if (n == batch_begin && begin != end) {
+    for (int i = begin; i < end; ++i) {
+      request(i);
+    }
+  }
+  else {
+    // Have to at least request one frame
+    request(end - 1);
   }
 }
 
@@ -810,14 +821,19 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
   }
 
   int input_index = n / 2;
-  int extract_index = input_index % config.batch_extract;
+  if (input_index == scene_begin_index_pending) {
+    scene_begin_index = scene_begin_index_pending;
+    scene_begin_index_pending = num_frames;
+  }
+  int extract_index = (input_index - scene_begin_index) % config.batch_extract;
   std::string result;
 
   // an extract batch starts at this frame
   if (extract_index == 0) {
-    // special logic at first frame
-    if (input_index == 0) {
+    // special logic at first frame of scene
+    if (input_index == scene_begin_index) {
       session->extractBatch(0, 0, 1);
+      requested_frames[0] = first_frame;
       loadFrameAt(requested_frames[0], 0);
       session->extract();
     }
@@ -829,15 +845,21 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
 
     int begin = input_index + 1;
     int end = std::min(begin + config.batch_extract, num_frames);
-    loaded_frames = end - begin;
     session->extractBatch(0, 1, config.batch_extract);
-    for (int i = 0; i < loaded_frames; ++i) {
-      auto frame_in = vsapi->getFrameFilter(begin + i, node, frameCtx);
-      loadFrameAt(frame_in, i);
-      requested_frames[i + 1] = frame_in;
+    for (loaded_frames = 0; loaded_frames < end - begin; ++loaded_frames) {
+      auto frame_in = vsapi->getFrameFilter(begin + loaded_frames, node, frameCtx);
+      assert(frame_in);
+      if (vsapi->mapGetInt(vsapi->getFramePropertiesRO(frame_in), "_SceneChangePrev", 0, nullptr)) {
+        first_frame = frame_in;
+        // This frame starts next scene. Record its index, and stop at previous frame
+        scene_begin_index_pending = begin + loaded_frames;
+        break;
+      }
+      loadFrameAt(frame_in, loaded_frames);
+      requested_frames[loaded_frames + 1] = frame_in;
     }
 
-    // This happens if we just reached the end for this batch.
+    // This happens if we just reached the end for this scene.
     // We then skip extract, duplicate extract output to match frame count.
     if (loaded_frames == 0) {
       session->duplicateExtractOutput(0, 1);
@@ -847,11 +869,11 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
       // process all new frames.
       session->extractBatch(0, 1, loaded_frames);
       session->extract();
-    }
 
-    if (loaded_frames != config.batch_extract) {
-      // We reached end. duplicate extract output of last frame to match frame count.
-      session->duplicateExtractOutput(loaded_frames, loaded_frames + 1);
+      if (loaded_frames != config.batch_extract) {
+        // We reached end of scene. duplicate extract output of last frame to match frame count.
+        session->duplicateExtractOutput(loaded_frames, loaded_frames + 1);
+      }
     }
   }
 
@@ -869,7 +891,7 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
 }
 
 std::string CycMuNetFilter::extractFrame(int n, VSFrame *&frame, VSCore *core, const VSAPI *vsapi) {
-  int offset = n % (2 * config.batch_extract);
+  int offset = (n - 2 * scene_begin_index) % (2 * config.batch_extract);
   int src_index = offset / 2;
   bool free_src = offset % 2;
   offset %= 2 * config.batch_fusion;

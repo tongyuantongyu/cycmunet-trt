@@ -5,7 +5,6 @@
 #include "optimize.h"
 
 #include "NvOnnxParser.h"
-#include "layers.h"
 
 #define COND_CHECK_EMPTY(cond, message)                                                                                \
   do {                                                                                                                 \
@@ -90,59 +89,24 @@ std::string ff_name(const OptimizationConfig &config) {
   return ss.str();
 }
 
-class ExtractionHolder {
-  nvinfer1::IRuntime *runtime;
-  nvinfer1::ICudaEngine *engine;
-  nvinfer1::IExecutionContext *context;
-  cudaStream_t stream;
-
- public:
-  ExtractionHolder(OptimizationConfig config, nvinfer1::ILogger &logger, std::filesystem::path fe_engine);
-  ~ExtractionHolder();
-};
-
-ExtractionHolder::ExtractionHolder(OptimizationConfig config, nvinfer1::ILogger &logger,
-                                   std::filesystem::path fe_engine)
-    : runtime {nvinfer1::createInferRuntime(logger)} {
-  std::ifstream engine_fe(fe_engine, std::ios::binary | std::ios::in);
-  std::vector<uint8_t> fe_engine_data(std::filesystem::file_size(fe_engine));
-  engine_fe.read((char *) (fe_engine_data.data()), fe_engine_data.size());
-  engine = runtime->deserializeCudaEngine(fe_engine_data.data(), fe_engine_data.size());
-  context = engine->createExecutionContext();
-  cudaStreamCreate(&stream);
-  context->setOptimizationProfileAsync(0, stream);
-  if (config.format == IOFormat::RGB) {
-    // TODO
-  }
-  else if (config.format == IOFormat::YUV420) {
-    context->setInputShape(
-        "y", nvinfer1::Dims4 {config.batch_extract.max, 1, config.input_height.max, config.input_width.max});
-    context->setInputShape(
-        "uv", nvinfer1::Dims4 {config.batch_extract.max, 2, config.input_height.max / 2, config.input_width.max / 2});
-  }
-  cudaStreamSynchronize(stream);
-}
-
-ExtractionHolder::~ExtractionHolder() {
-  cudaStreamDestroy(stream);
-  delete context;
-  delete engine;
-  delete runtime;
-}
-
 nvinfer1::IBuilderConfig *OptimizationContext::prepareConfig() const {
   auto conf = builder->createBuilderConfig();
   if (config.use_fp16) {
     conf->setFlag(nvinfer1::BuilderFlag::kFP16);
   }
+  conf->setFlag(nvinfer1::BuilderFlag::kTF32);
   conf->setFlag(nvinfer1::BuilderFlag::kSPARSE_WEIGHTS);
   conf->setFlag(nvinfer1::BuilderFlag::kPREFER_PRECISION_CONSTRAINTS);
   // /usr/src/tensorrt/bin/trtexec --verbose --noDataTransfers --useCudaGraph --separateProfileRun --useSpinWait --nvtxMode=verbose --loadEngine=./mutual_cycle.engine --exportTimes=./mutual_cycle.timing.json --exportProfile=./mutual_cycle.profile.json --exportLayerInfo=./mutual_cycle.graph.json --timingCacheFile=./timing.cache --best --avgRuns=1000 "--shapes=lf0:1x64x180x270,lf1:1x64x180x270,lf2:1x64x180x270"
   conf->setProfilingVerbosity(nvinfer1::ProfilingVerbosity::kDETAILED);
-  conf->setTacticSources(conf->getTacticSources() &
-                         ~nvinfer1::TacticSources((1u << int32_t(nvinfer1::TacticSource::kCUDNN)) |
-                                                  (1u << int32_t(nvinfer1::TacticSource::kEDGE_MASK_CONVOLUTIONS))));
-  conf->setPreviewFeature(nvinfer1::PreviewFeature::kDISABLE_EXTERNAL_TACTIC_SOURCES_FOR_CORE_0805, true);
+  cudaDeviceProp prop {};
+  cudaGetDeviceProperties(&prop, 0);
+  if (prop.major >= 7) {
+    conf->setTacticSources(nvinfer1::TacticSources((1u << int32_t(nvinfer1::TacticSource::kCUBLAS)) |
+                                                   (1u << int32_t(nvinfer1::TacticSource::kCUBLAS_LT)) |
+                                                   (1u << int32_t(nvinfer1::TacticSource::kJIT_CONVOLUTIONS))));
+    conf->setPreviewFeature(nvinfer1::PreviewFeature::kDISABLE_EXTERNAL_TACTIC_SOURCES_FOR_CORE_0805, true);
+  }
 
   if (cache != nullptr) {
     conf->setTimingCache(*cache, false);
@@ -208,8 +172,6 @@ int OptimizationContext::optimize(const std::string &folder) {
 
   auto ff_target = path_prefix / "engines" / folder / ff_name(config);
   if (!exists(ff_target)) {
-    //    ExtractionHolder fe_holder(config, logger, fe_target);
-
     auto ff_source_file = path_prefix / "models" / folder / "ff.onnx";
     std::ifstream input_ff(ff_source_file, std::ios::binary | std::ios::in);
     COND_CHECK_EMPTY(input_ff.is_open(), "Source model file not exist:" << ff_source_file);
@@ -277,7 +239,7 @@ int OptimizationContext::buildFeatureExtract(std::vector<uint8_t> input, const s
 
   auto optimize_config = prepareConfig();
   // value from experience
-  optimize_config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, total_memory / 24);
+  //  optimize_config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, total_memory / 24);
   optimize_config->addOptimizationProfile(profile);
   auto modelStream = builder->buildSerializedNetwork(*network, *optimize_config);
   COND_CHECK_EMPTY(modelStream != nullptr, "Failed build feature extract net.");
@@ -347,7 +309,7 @@ int OptimizationContext::buildFeatureFusion(std::vector<uint8_t> input, const st
 
   auto optimize_config = prepareConfig();
   // value from experience
-  optimize_config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, total_memory / 2);
+  //  optimize_config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, total_memory / 2);
   optimize_config->addOptimizationProfile(profile);
   auto modelStream = builder->buildSerializedNetwork(*network, *optimize_config);
   COND_CHECK_EMPTY(modelStream != nullptr, "Failed build feature fusion net.");
