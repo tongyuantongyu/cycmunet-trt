@@ -1,7 +1,0 @@
-syntax = "proto3";
-
-package weights;
-
-message Weights {
-  map<string, bytes> weights = 1;
-}

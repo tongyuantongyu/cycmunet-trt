@@ -28,7 +28,6 @@ endif()
 
 find_package(CUDAToolkit 11.8 REQUIRED COMPONENTS cublas)
 find_package(TensorRT 8.5 REQUIRED COMPONENTS OnnxParser)
-find_package(cuDNN REQUIRED)
 find_package(GTest 1 REQUIRED)
 
 option(VAPOURSYNTH_PLUGIN "Enable Vapoursynth plugin" OFF)
