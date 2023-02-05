@@ -23,6 +23,7 @@ class OptimizationContext {
   nvinfer1::IBuilder *builder;
   nvinfer1::ITimingCache *cache;
 
+  cudaDeviceProp prop;
   size_t total_memory;
 
   [[nodiscard]] nvinfer1::IBuilderConfig *prepareConfig() const;

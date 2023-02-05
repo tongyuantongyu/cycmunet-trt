@@ -293,6 +293,11 @@ std::string CycMuNetFilter::init1(const VSMap *in, VSCore *core, const VSAPI *vs
     model_path = model_path.remove_filename() / "dev.tyty.aim.cycmunet";
   }
 
+  auto low_mem = bool(vsapi->mapGetInt(in, "low_mem", 0, &err));
+  if (err) {
+    low_mem = false;
+  }
+
   config = {int32_t(alignment(vi->width, 32)),
             int32_t(alignment(vi->height, 32)),
             batch_size,
@@ -301,7 +306,8 @@ std::string CycMuNetFilter::init1(const VSMap *in, VSCore *core, const VSAPI *vs
             scale_factor,
             format,
             extraction_layers,
-            use_fp16};
+            use_fp16,
+            low_mem};
 
   vo = *vi;
   vo.width = int(double(scale_factor) * vo.width);
@@ -478,7 +484,8 @@ std::string CycMuNetFilter::init2(const VSFrame *frame, VSCore *core, const VSAP
                                        config.scale_factor,
                                        config.format,
                                        config.extraction_layers,
-                                       config.use_fp16},
+                                       config.use_fp16,
+                                       config.low_mem},
                                       *logger,
                                       model_path};
 
@@ -486,6 +493,7 @@ std::string CycMuNetFilter::init2(const VSFrame *frame, VSCore *core, const VSAP
     if (err) {
       return "CycMuNet: failed building engine for current input dimension";
     }
+    vsapi->logMessage(mtInformation, "CycMuNet: done building engine.", core);
   }
 
   if (!ctx->load_engine()) {
@@ -1038,7 +1046,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                            "norm_mean:float[]:opt;"
                            "norm_std:float[]:opt;"
                            "raw_norm:int:opt;"
-                           "model_path:data:opt;",
+                           "model_path:data:opt;"
+                           "low_mem:int:opt;",
                            "clip:vnode;", cycmunetCreate, nullptr, plugin);
   vspapi->registerFunction("CycMuNetVersion", "", "", dependencyVersion, nullptr, plugin);
 }

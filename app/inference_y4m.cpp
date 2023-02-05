@@ -316,7 +316,8 @@ int main(int argc, char **argv) {
                           2.0,
                           IOFormat::YUV420,
                           4,
-                          true};
+                          false,
+                          false};
 
   InferenceContext context {config, gLogger, "models/engines/y4m_any"};
   if (!context.has_file()) {
@@ -328,7 +329,8 @@ int main(int argc, char **argv) {
                                        config.scale_factor,
                                        config.format,
                                        config.extraction_layers,
-                                       config.use_fp16},
+                                       config.use_fp16,
+                                       config.low_mem},
                                       gLogger,
                                       "models"};
 

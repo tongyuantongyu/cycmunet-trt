@@ -59,7 +59,18 @@ static void inspectNetwork(nvinfer1::INetworkDefinition *network) {
 //       |
 // HR of input
 
-std::string fe_name(const OptimizationConfig &config) {
+static std::string model_name_suffix(const OptimizationConfig &config) {
+  std::stringstream ss;
+  ss << "_" << config.scale_factor << "x"
+     << "_l" << config.extraction_layers;
+  if (config.format == IOFormat::YUV420) {
+    ss << "_yuv1-1";
+  }
+  ss << ".onnx";
+  return ss.str();
+}
+
+static std::string fe_engine_name(const OptimizationConfig &config) {
   std::stringstream ss;
   ss << "fe_";
   ss << config.input_width.opt << 'x' << config.input_height.opt << '_' << config.scale_factor << "x"
@@ -70,11 +81,14 @@ std::string fe_name(const OptimizationConfig &config) {
   if (config.use_fp16) {
     ss << "_fp16";
   }
+  if (config.low_mem) {
+    ss << "_lm";
+  }
   ss << ".engine";
   return ss.str();
 }
 
-std::string ff_name(const OptimizationConfig &config) {
+static std::string ff_engine_name(const OptimizationConfig &config) {
   std::stringstream ss;
   ss << "ff_";
   ss << config.input_width.opt << 'x' << config.input_height.opt << '_' << config.scale_factor << "x"
@@ -84,6 +98,9 @@ std::string ff_name(const OptimizationConfig &config) {
   }
   if (config.use_fp16) {
     ss << "_fp16";
+  }
+  if (config.low_mem) {
+    ss << "_lm";
   }
   ss << ".engine";
   return ss.str();
@@ -99,9 +116,7 @@ nvinfer1::IBuilderConfig *OptimizationContext::prepareConfig() const {
   conf->setFlag(nvinfer1::BuilderFlag::kPREFER_PRECISION_CONSTRAINTS);
   // /usr/src/tensorrt/bin/trtexec --verbose --noDataTransfers --useCudaGraph --separateProfileRun --useSpinWait --nvtxMode=verbose --loadEngine=./mutual_cycle.engine --exportTimes=./mutual_cycle.timing.json --exportProfile=./mutual_cycle.profile.json --exportLayerInfo=./mutual_cycle.graph.json --timingCacheFile=./timing.cache --best --avgRuns=1000 "--shapes=lf0:1x64x180x270,lf1:1x64x180x270,lf2:1x64x180x270"
   conf->setProfilingVerbosity(nvinfer1::ProfilingVerbosity::kDETAILED);
-  cudaDeviceProp prop {};
-  cudaGetDeviceProperties(&prop, 0);
-  if (prop.major >= 7) {
+  if (config.low_mem) {
     conf->setTacticSources(nvinfer1::TacticSources((1u << int32_t(nvinfer1::TacticSource::kCUBLAS)) |
                                                    (1u << int32_t(nvinfer1::TacticSource::kCUBLAS_LT)) |
                                                    (1u << int32_t(nvinfer1::TacticSource::kJIT_CONVOLUTIONS))));
@@ -122,14 +137,18 @@ nvinfer1::INetworkDefinition *OptimizationContext::createNetwork() const {
 OptimizationContext::OptimizationContext(OptimizationConfig config, nvinfer1::ILogger &logger,
                                          std::filesystem::path path_prefix_)
     : config(config), logger(logger), path_prefix(std::move(path_prefix_)),
-      builder(nvinfer1::createInferBuilder(logger)), cache(nullptr), total_memory {} {
+      builder(nvinfer1::createInferBuilder(logger)), cache(nullptr), prop {}, total_memory {} {
   auto conf = builder->createBuilderConfig();
   cudaMemGetInfo(nullptr, &total_memory);
+  cudaGetDeviceProperties(&prop, 0);
   logger.log(nvinfer1::ILogger::Severity::kINFO,
              ("Device has " + std::to_string(total_memory) + " byte memory.").c_str());
 
   if (builder->platformHasFastFp16() && !config.use_fp16) {
-    logger.log(nvinfer1::ILogger::Severity::kWARNING, "Fast FP16 is available but not enabled.");
+    // CUDA Architecture 6.1 (Pascal, GTX10xx series) does not have really useful FP16.
+    if (prop.major != 6 || prop.minor != 1) {
+      logger.log(nvinfer1::ILogger::Severity::kWARNING, "Fast FP16 is available but not enabled.");
+    }
   }
 
   auto cache_file = path_prefix / "timing.cache";
@@ -157,9 +176,9 @@ OptimizationContext::~OptimizationContext() {
 }
 
 int OptimizationContext::optimize(const std::string &folder) {
-  auto fe_target = path_prefix / "engines" / folder / fe_name(config);
+  auto fe_target = path_prefix / "engines" / folder / fe_engine_name(config);
   if (!exists(fe_target)) {
-    auto fe_source_file = path_prefix / "models" / folder / "fe.onnx";
+    auto fe_source_file = path_prefix / "models" / folder / ("fe" + model_name_suffix(config));
     std::ifstream input_fe(fe_source_file, std::ios::binary | std::ios::in);
     COND_CHECK_EMPTY(input_fe.is_open(), "Source model file not exist:" << fe_source_file);
     std::vector<uint8_t> fe_source(std::filesystem::file_size(fe_source_file));
@@ -170,9 +189,9 @@ int OptimizationContext::optimize(const std::string &folder) {
     }
   }
 
-  auto ff_target = path_prefix / "engines" / folder / ff_name(config);
+  auto ff_target = path_prefix / "engines" / folder / ff_engine_name(config);
   if (!exists(ff_target)) {
-    auto ff_source_file = path_prefix / "models" / folder / "ff.onnx";
+    auto ff_source_file = path_prefix / "models" / folder / ("ff" + model_name_suffix(config));
     std::ifstream input_ff(ff_source_file, std::ios::binary | std::ios::in);
     COND_CHECK_EMPTY(input_ff.is_open(), "Source model file not exist:" << ff_source_file);
     std::vector<uint8_t> ff_source(std::filesystem::file_size(ff_source_file));

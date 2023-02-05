@@ -2,9 +2,6 @@ find_path(VapourSynth_INCLUDE_DIR
           NAMES VapourSynth4.h
           PATH_SUFFIXES vapoursynth)
 
-find_library(VapourSynth_LIBRARY
-             NAMES VapourSynth vapoursynth)
-
 
 function(_vapoursynth_get_version)
     unset(VapourSynth_VERSION_STRING PARENT_SCOPE)
@@ -32,12 +29,11 @@ _vapoursynth_get_version()
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(VapourSynth
                                   FOUND_VAR VapourSynth_FOUND
-                                  REQUIRED_VARS VapourSynth_LIBRARY VapourSynth_INCLUDE_DIR
+                                  REQUIRED_VARS VapourSynth_INCLUDE_DIR
                                   VERSION_VAR VapourSynth_VERSION_STRING
                                   HANDLE_COMPONENTS)
 
-add_library(VapourSynth UNKNOWN IMPORTED)
+add_library(VapourSynth INTERFACE IMPORTED)
 target_include_directories(VapourSynth SYSTEM INTERFACE "${VapourSynth_INCLUDE_DIR}")
-set_property(TARGET VapourSynth PROPERTY IMPORTED_LOCATION "${VapourSynth_LIBRARY}")
 
-mark_as_advanced(VapourSynth_INCLUDE_DIR VapourSynth_LIBRARY)
+mark_as_advanced(VapourSynth_INCLUDE_DIR)

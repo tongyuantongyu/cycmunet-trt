@@ -18,7 +18,7 @@
     if (ret != 0) {                                                                                                    \
       std::stringstream s;                                                                                             \
       s << "Cuda failure at " __FILE__ ":" << __LINE__ << ": " << cudaGetErrorName(ret);                               \
-      logger.log(nvinfer1::ILogger::Severity::kERROR, s.str().c_str());                                                \
+      logger.log(nvinfer1::ILogger::Severity::kINTERNAL_ERROR, s.str().c_str());                                       \
       return;                                                                                                          \
     }                                                                                                                  \
   } while (0)
@@ -28,7 +28,7 @@
     if (!(cond)) {                                                                                                     \
       std::stringstream s;                                                                                             \
       s << "Check failed " __FILE__ ":" << __LINE__ << ": " #cond ", " << message;                                     \
-      logger.log(nvinfer1::ILogger::Severity::kERROR, s.str().c_str());                                                \
+      logger.log(nvinfer1::ILogger::Severity::kINTERNAL_ERROR, s.str().c_str());                                       \
       return;                                                                                                          \
     }                                                                                                                  \
   } while (0)
@@ -38,7 +38,7 @@
     if (!(cond)) {                                                                                                     \
       std::stringstream s;                                                                                             \
       s << "Check failed " __FILE__ ":" << __LINE__ << ": " #cond ", " << message;                                     \
-      logger.log(nvinfer1::ILogger::Severity::kERROR, s.str().c_str());                                                \
+      logger.log(nvinfer1::ILogger::Severity::kINTERNAL_ERROR, s.str().c_str());                                       \
       return nullptr;                                                                                                  \
     }                                                                                                                  \
   } while (0)
@@ -62,7 +62,7 @@ static nvinfer1::ICudaEngine *loadModel(nvinfer1::IRuntime *runtime, nvinfer1::I
   return engine;
 }
 
-static std::string fe_name(const InferenceConfig &config) {
+static std::string fe_engine_name(const InferenceConfig &config) {
   std::stringstream ss;
   ss << "fe_";
   ss << config.input_width << 'x' << config.input_height << '_' << config.scale_factor << "x"
@@ -73,11 +73,14 @@ static std::string fe_name(const InferenceConfig &config) {
   if (config.use_fp16) {
     ss << "_fp16";
   }
+  if (config.low_mem) {
+    ss << "_lm";
+  }
   ss << ".engine";
   return ss.str();
 }
 
-static std::string ff_name(const InferenceConfig &config) {
+static std::string ff_engine_name(const InferenceConfig &config) {
   std::stringstream ss;
   ss << "ff_";
   ss << config.input_width << 'x' << config.input_height << '_' << config.scale_factor << "x"
@@ -88,6 +91,9 @@ static std::string ff_name(const InferenceConfig &config) {
   if (config.use_fp16) {
     ss << "_fp16";
   }
+  if (config.low_mem) {
+    ss << "_lm";
+  }
   ss << ".engine";
   return ss.str();
 }
@@ -97,12 +103,12 @@ InferenceContext::InferenceContext(InferenceConfig config, nvinfer1::ILogger &lo
       runtime(nvinfer1::createInferRuntime(logger)), path_prefix {std::move(path_prefix)}, engine {} {}
 
 bool InferenceContext::has_file() {
-  return exists(path_prefix / fe_name(config)) && exists(path_prefix / ff_name(config));
+  return exists(path_prefix / fe_engine_name(config)) && exists(path_prefix / ff_engine_name(config));
 }
 
 bool InferenceContext::load_engine() {
-  engine.feature_extract = loadModel(runtime, logger, path_prefix / fe_name(config));
-  engine.feature_fusion = loadModel(runtime, logger, path_prefix / ff_name(config));
+  engine.feature_extract = loadModel(runtime, logger, path_prefix / fe_engine_name(config));
+  engine.feature_fusion = loadModel(runtime, logger, path_prefix / ff_engine_name(config));
   return good();
 }
 
@@ -137,7 +143,12 @@ InferenceSession::InferenceSession(InferenceContext &ctx)
 
   auto deviceMemory =
       std::max(ctx.engine.feature_extract->getDeviceMemorySize(), ctx.engine.feature_fusion->getDeviceMemorySize());
-  logger.log(nvinfer1::ILogger::Severity::kINFO, ("Device memory needed: " + std::to_string(deviceMemory) + " bytes").c_str());
+  size_t freeMemory {};
+  cudaMemGetInfo(&freeMemory, nullptr);
+  logger.log(freeMemory > deviceMemory ? nvinfer1::ILogger::Severity::kINFO : nvinfer1::ILogger::Severity::kWARNING,
+             ("Device memory: " + std::to_string(freeMemory) + " bytes free, " + std::to_string(deviceMemory) +
+              " bytes needed.")
+                 .c_str());
   CUDA_CHECK(cudaMallocAsync(&executionMemory, deviceMemory, stream));
   context.feature_extract->setDeviceMemory(executionMemory);
   context.feature_fusion->setDeviceMemory(executionMemory);

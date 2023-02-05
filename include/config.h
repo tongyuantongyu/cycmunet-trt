@@ -30,6 +30,7 @@ struct OptimizationConfig {
   int32_t extraction_layers;
 
   bool use_fp16;
+  bool low_mem;
 };
 
 struct InferenceConfig {
@@ -46,4 +47,5 @@ struct InferenceConfig {
   int32_t extraction_layers;
 
   bool use_fp16;
+  bool low_mem;
 };
