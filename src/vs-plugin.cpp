@@ -873,7 +873,8 @@ std::string CycMuNetFilter::prepareFrame(int n, VSFrameContext *frameCtx, const 
     for (loaded_frames = 0; loaded_frames < end - begin; ++loaded_frames) {
       auto frame_in = vsapi->getFrameFilter(begin + loaded_frames, node, frameCtx);
       assert(frame_in);
-      if (vsapi->mapGetInt(vsapi->getFramePropertiesRO(frame_in), "_SceneChangePrev", 0, nullptr)) {
+      int err;  // ignore key absent error: no scene change info is not critical
+      if (vsapi->mapGetInt(vsapi->getFramePropertiesRO(frame_in), "_SceneChangePrev", 0, &err)) {
         first_frame = frame_in;
         // This frame starts next scene. Record its index, and stop at previous frame
         scene_begin_index_pending = begin + loaded_frames;
