@@ -121,6 +121,7 @@ nvinfer1::IBuilderConfig *OptimizationContext::prepareConfig() const {
                                                    (1u << int32_t(nvinfer1::TacticSource::kCUBLAS_LT)) |
                                                    (1u << int32_t(nvinfer1::TacticSource::kJIT_CONVOLUTIONS))));
     conf->setPreviewFeature(nvinfer1::PreviewFeature::kDISABLE_EXTERNAL_TACTIC_SOURCES_FOR_CORE_0805, true);
+    conf->setPreviewFeature(nvinfer1::PreviewFeature::kFASTER_DYNAMIC_SHAPES_0805, true);
   }
 
   if (cache != nullptr) {
