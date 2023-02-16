@@ -5,7 +5,6 @@
 #pragma once
 
 #include "NvInfer.h"
-#include "NvOnnxParser.h"
 
 #include <array>
 #include <filesystem>

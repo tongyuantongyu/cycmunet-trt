@@ -68,17 +68,17 @@ void import_pixel(md_view<F, 2> dst, md_view<const U, 2> src, float a, float b, 
 }
 
 template void import_pixel<float, uint8_t>(md_view<float, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
-                                      cudaStream_t stream);
+                                           cudaStream_t stream);
 template void import_pixel<half, uint8_t>(md_view<half, 2> dst, md_view<const uint8_t, 2> src, float a, float b,
-                                     cudaStream_t stream);
+                                          cudaStream_t stream);
 template void import_pixel<float, uint16_t>(md_view<float, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
-                                       cudaStream_t stream);
+                                            cudaStream_t stream);
 template void import_pixel<half, uint16_t>(md_view<half, 2> dst, md_view<const uint16_t, 2> src, float a, float b,
-                                      cudaStream_t stream);
+                                           cudaStream_t stream);
 template void import_pixel<float, half>(md_view<float, 2> dst, md_view<const half, 2> src, float a, float b,
-                                      cudaStream_t stream);
+                                        cudaStream_t stream);
 template void import_pixel<half, half>(md_view<half, 2> dst, md_view<const half, 2> src, float a, float b,
-                                     cudaStream_t stream);
+                                       cudaStream_t stream);
 template void import_pixel<float, float>(md_view<float, 2> dst, md_view<const float, 2> src, float a, float b,
                                          cudaStream_t stream);
 template void import_pixel<half, float>(md_view<half, 2> dst, md_view<const float, 2> src, float a, float b,
