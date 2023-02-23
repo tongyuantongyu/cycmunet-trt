@@ -48,8 +48,14 @@ class Logger : public nvinfer1::ILogger {
   VSCore *core;
   logMessage_t logMessage;
 
+#if defined(NDEBUG) || defined(_NDEBUG)
+  constexpr static VSMessageType trtInfoLevel = VSMessageType::mtDebug;
+#else
+  constexpr static VSMessageType trtInfoLevel = VSMessageType::mtInformation;
+#endif
+
   constexpr static VSMessageType typeMap[] = {VSMessageType::mtFatal, VSMessageType::mtWarning,
-                                              VSMessageType::mtWarning, VSMessageType::mtDebug,
+                                              VSMessageType::mtWarning, trtInfoLevel,
                                               VSMessageType::mtDebug};
 };
 
@@ -789,6 +795,10 @@ std::string CycMuNetFilter::writeYUV(offset_t position, VSFrame *frame, const VS
 
 void CycMuNetFilter::requestFrames(int n, VSFrameContext *frameCtx, const VSAPI *vsapi) const {
   auto request = [&](int i) { vsapi->requestFrameFilter(i, node, frameCtx); };
+//  auto request = [&](int i) {
+//    vsapi->requestFrameFilter(i, node, frameCtx);
+//    logger->log(nvinfer1::ILogger::Severity::kWARNING, "Requesting f #" + std::to_string(i));
+//  };
 
   // Get the index of the first frame of current scene
   auto scene_begin_index_current = n / 2 >= scene_begin_index_pending ? scene_begin_index_pending : scene_begin_index;
